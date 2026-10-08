@@ -8,16 +8,17 @@ export function redact(text) {
     .replace(/\b([A-Z_]*(?:API_KEY|TOKEN|SECRET|PASSWORD))\s*[=:]\s*["']?[^\s"',}]+/g, '$1=[REDACTED]');
 }
 
-function snapshot(messages, stateVersion, startsAt) {
+export function snapshot(messages, stateVersion, startsAt, source = 'historical', secrets = []) {
   const exposeLoss = stateVersion !== '1';
+  const scrub = text => secrets.reduce((value, secret) => value.split(secret).join('[REDACTED]'), redact(text));
   // Text only. Tool input/output and hidden reasoning are deliberately excluded.
   const entries = messages.filter(m => ['user', 'assistant', 'compaction'].includes(m.type)).map(m => {
     const original = String(m.type === 'user' ? m.text ?? '' : m.type === 'compaction' ? m.summary ?? ''
       : (m.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('\n'));
-    const text = redact(original), limit = m.type === 'assistant' ? 6000 : 3000;
+    const text = scrub(original), limit = m.type === 'assistant' ? 6000 : 3000;
     const tools = (m.content ?? []).filter(p => p.type === 'tool');
     return { role: m.type === 'compaction' ? 'summary' : m.type, text: text.slice(0, limit),
-      ...(m.type === 'assistant' ? { tools: tools.slice(-12).map(p => ({ name: redact(p.name).slice(0, 80), status: p.state?.status })) } : {}),
+      ...(m.type === 'assistant' ? { tools: tools.slice(-12).map(p => ({ name: scrub(p.name).slice(0, 80), status: p.state?.status })) } : {}),
       ...(exposeLoss ? { loss: { textClipped: text.length > limit, redacted: text !== original,
         omittedToolStatuses: m.type === 'assistant' ? Math.max(0, tools.length - 12) : 0 } } : {}) };
   });
@@ -40,7 +41,7 @@ function snapshot(messages, stateVersion, startsAt) {
     } : { status: 'unavailable', reason: 'no-user-message-within-source-boundary',
       provenance: { startsAt, authority: 'not-verified' } } } : {}),
     coverage: { omittedEntries: entries.length - recent.length, toolContentsExcluded: true,
-      historicalContextReconstructed: true, ...(exposeLoss ? {
+      historicalContextReconstructed: source === 'historical', ...(source === 'live' ? { source: 'opencode-session-context-api', observerToolExcluded: true } : {}), ...(exposeLoss ? {
         textClippedEntries: recent.filter(e => e.loss.textClipped).length,
         redactedEntries: recent.filter(e => e.loss.redacted).length,
         omittedToolStatuses: recent.reduce((n, e) => n + e.loss.omittedToolStatuses, 0),

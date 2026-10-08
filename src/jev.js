@@ -42,9 +42,10 @@ function choice(value, names) {
   return p;
 }
 
-export async function judgeJev(record, configuration, timeout, recipe = 'done-shape-v1') {
+export async function judgeJev(record, configuration, timeout, recipe = 'done-shape-v1', parentSignal) {
   const selectedQuestions = recipe === 'checkpoint-v2' ? checkpointQuestions : questions;
-  const signal = AbortSignal.timeout(timeout);
+  const deadline = AbortSignal.timeout(timeout);
+  const signal = parentSignal ? AbortSignal.any([deadline, parentSignal]) : deadline;
   try {
     // No reviewer/future data. Scrub the known key even when it was mentioned
     // without a recognizable credential prefix in historical conversation.

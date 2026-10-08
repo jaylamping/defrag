@@ -9,8 +9,10 @@ replayed real checkpoints and replaced when a measurement shows a gain.
 
 ## Status
 
-The local evaluation CLI works. No live IDE adapters ship yet, no accuracy has
-been measured, and no default judge has been replaced. TypeSafe Jev remains the
+The local evaluation CLI works, and an experimental manual OpenCode V2 server
+plugin can be loaded from this checkout. Other live IDE adapters and automatic
+monitoring do not ship yet. No accuracy has been measured, and no default judge
+has been replaced. TypeSafe Jev remains the
 first production judge and has an implemented, fixture-tested adapter. The eval
 supports **Jev**, **OpenAI Decisions**, **rules**, a **threshold proxy**, and an
 optional **local OpenAI-compatible model**. Both hosted judges require explicit
@@ -35,6 +37,100 @@ All commands run from this repository. Output files are created privately
 never overwritten. Labels are the exception: reviews append to a private label
 file so corrections have a history. `eval/data/` and `eval/results/` are ignored
 by Git. Do not put private data elsewhere or force-add those directories.
+
+## Manual OpenCode / OpenChamber plugin
+
+Start with **local preview only**. Append this entry to your existing OpenCode
+V2 `plugins` array in a project `opencode.json(c)` or your global
+`~/.config/opencode/opencode.json(c)`. Keep unrelated settings and existing
+plugins; do not replace the whole file with this example:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["/absolute/path/to/defrag"],
+}
+```
+
+Use the checkout directory, not `src/cli.js`. The root `index.js` is the server
+plugin entrypoint. No npm installation, SDK dependency or API key is needed for
+preview. This is a **server plugin**, not a `cli.json` terminal plugin or an
+OpenChamber agent definition. OpenChamber must connect to the V2 service loading
+that configuration. Other hosts and OpenCode V1 are not supported by this adapter.
+
+In a session in the configured project, ask your agent:
+
+> Run `defrag_preview` once. Report its metadata only; do not compact or do any other work.
+
+The tool returns a snapshot fingerprint, request availability/loss/provenance,
+coverage and encoded size, **not transcript text or a safety judgment**. It reads
+only the caller's session through the V2 API; it does not scan the historical
+database, read credentials, write reports, subscribe to idle events, or make
+judge requests. Ordinary agent conversation can still incur your host's usual
+model costs. Config changes normally reload; changes to dependencies outside
+watched config directories may require restarting OpenCode when active work can
+be safely interrupted. Verify the plugin is active using `opencode plugin list`
+or the V2 plugin API from the configured project.
+
+### Optional manual hosted checks
+
+To register `defrag_check`, replace just that plugin entry with:
+
+```jsonc
+{
+  "package": "/absolute/path/to/defrag",
+  "options": {
+    "remoteEnabled": true,
+    "keyFile": "/absolute/path/to/private/typesafe.key",
+    "timeoutMs": 5000,
+  },
+}
+```
+
+`keyFile` must be an absolute path to a private regular file (mode `0600`) holding
+your TypeSafe key. Never put the key itself in config, a prompt, a tool argument
+or this repository. The adapter uses Jev with **state v3 / checkpoint-v2** and
+the unchanged 0.9 floor. Decisions is still an eval-only option. `timeoutMs`
+must be an integer from 1 to 10,000. `endpoint` is optional and restricted by the
+existing Jev adapter to the official HTTPS URL or a loopback fixture.
+
+Then explicitly request one `defrag_check`. Its `defrag.remote` permission hook
+requires a fresh host permission prompt even if a configured/saved rule would
+allow it; explicit denies remain denies. Reject the prompt to send nothing.
+Do not use another permission-altering plugin to auto-approve this action.
+Enabling the tool alone does not make judge requests. Each admitted invocation
+attempts at most one judgment, without retries or fallback. Snapshot text leaves
+your machine and costs may apply; redaction is best-effort and private work or
+natural-language secrets can remain. The known Jev key is additionally scrubbed.
+
+Results are returned through normal tool output, not extra saved reports.
+`decision`, `assessment`, `axes`, `blockedBy`, `score` and `floor` describe the
+experimental judge's answer, **not calibrated safety or permission to compact**.
+`hostedCalls` counts judge attempts; transport failures may not reach the provider.
+The adapter rechecks local context after inference and withholds changed results
+as `decision: null, error: stale-context`. The revision check includes excluded
+tool contents, not just retained text. Stops and plugin unload cancel outstanding
+work; simultaneous checks on the same session or known active non-observer
+tools abstain as `busy` before hosted work. This does not verify every background
+worker, pending inbox item or external prerequisite.
+
+This is a live **context approximation**, not a successful historical idle
+checkpoint. Newer user instructions remain in the snapshot; only the calling
+observer tool part is excluded. If no completed compaction marker is visible,
+the source boundary is `session-context-boundary`, not a claimed session start.
+System/skill/synthetic messages, attachments, tool contents, reasoning and native
+provider state are not sent. They can contain material facts this snapshot lacks.
+Original scope and host persistence remain unverified. A preview fingerprint may
+differ from a hosted-check fingerprint because preview does not read/scrub the
+known credential, and because the session changes between tool invocations.
+
+Defrag never requests compaction, edits prompts, changes host compaction settings,
+or launches background checks. **OpenCode's own automatic compaction is unaffected.**
+Package loading has been checked in isolated OpenCode 2.0.20 servers, with remote
+registration disabled and enabled, and the tool/permission contracts have local
+fixtures. No real hosted checks through this plugin or actual OpenChamber tool
+visibility/permission UI have been tested. Try local preview first; native
+compaction continuation and human-reviewed accuracy are still unmeasured.
 
 ## 1. Extract checkpoints
 
@@ -545,14 +641,29 @@ identities, blocker categories, private outputs and no new inference attribution
 They do not establish real model accuracy or live IDE
 compatibility.
 
+Plugin fixtures cover local preview, current-session ownership, per-call
+permission prompting, credential scrubbing, frozen v2 scoring, stale full-context
+revalidation, transport failures, cancellation/unload, concurrent-check blocking
+and package contents. Actual host loading is a separate optional check:
+
+```sh
+DEFRAG_OPENCODE_BIN=opencode node --test test/opencode-host.test.js
+```
+
+It starts and stops disposable V2 servers with isolated HOME/XDG configuration,
+data, cache and service state, no inherited provider credentials, and no model
+requests. It does not install the plugin into or restart your active service.
+The two host-loading tests are skipped by default when this variable is absent.
+
 Benchmark CLI fixtures also cover resident workers, offline flags, private
 outputs, future-data exclusion, invalid probabilities, input-limit abstentions,
 truncation rejection, worker exits and timeouts. They do not download or load
 real weights during `npm run check`.
 
-Next: reviewed natural checkpoints and explicitly approved, matching-fingerprint
-v1/v2 hosted comparisons, then live lifecycle
-coordination and independently verified adapters for OpenCode/OpenChamber, Claude Code,
+Next: verify manual preview and consent prompts in the actual OpenChamber/OpenCode
+client, then human-reviewed natural checkpoints and explicitly approved v3
+behavior/controlled-continuation experiments. Automatic lifecycle coordination
+and independently verified adapters remain future work for OpenCode/OpenChamber, Claude Code,
 Codex, Cursor and oh-my-pi. Auto-compaction must be opt-in and capability-gated;
 hosts without a supported external compact operation must remain hint-only.
 Live adapters need per-operation error categories, session ownership checks,

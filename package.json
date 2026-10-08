@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
+  "main": "./index.js",
+  "exports": { ".": "./index.js" },
+  "files": ["index.js", "src/*.js", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
   "engines": { "node": ">=24" },
   "bin": { "defrag": "./src/cli.js" },
   "scripts": {
