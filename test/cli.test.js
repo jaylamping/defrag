@@ -57,6 +57,56 @@ test('extract writes private, redacted root checkpoints without future leakage',
   assert.notEqual(run('extract', '--db', path, '--out', out).status, 0, 'must not overwrite a corpus');
 });
 
+test('v2 extraction exposes within-entry loss without claiming original scope is complete', () => {
+  const { dir, path } = fixture();
+  const db = new DatabaseSync(path);
+  db.prepare("UPDATE session_message SET data = ? WHERE id = 'root-1'").run(JSON.stringify({ text: 'x'.repeat(3100) + ' API_KEY=hidden-constraint' }));
+  const assistant = JSON.parse(db.prepare("SELECT data FROM session_message WHERE id = 'root-2'").get().data);
+  assistant.content = [{ type: 'text', text: 'a'.repeat(6100) }, ...Array.from({ length: 13 }, () => ({ type: 'tool', name: 'shell', state: { status: 'completed' } }))];
+  db.prepare("UPDATE session_message SET data = ? WHERE id = 'root-2'").run(JSON.stringify(assistant));
+  db.close();
+  const before = readFileSync(path), out = join(dir, 'v2.jsonl');
+  const result = run('extract', '--db', path, '--out', out, '--state-version', '2');
+  assert.equal(result.status, 0, result.stderr);
+  const record = JSON.parse(readFileSync(out, 'utf8'));
+  assert.equal(record.state.version, 2);
+  assert.equal(record.state.coverage.omittedEntries, 0);
+  assert.equal(record.state.coverage.textClippedEntries, 2);
+  assert.equal(record.state.coverage.redactedEntries, 1);
+  assert.equal(record.state.coverage.omittedToolStatuses, 1);
+  assert.deepEqual(record.state.recent[0].loss, { textClipped: true, redacted: true, omittedToolStatuses: 0 });
+  assert.equal(record.state.recent[1].loss.textClipped, true);
+  assert.deepEqual(record.state.coverage.sourceHistory, { startsAt: 'session-start', originalTaskScope: 'not-verified', providerContext: 'approximation' });
+  assert.equal(record.state.compaction.persistence, 'unknown');
+  assert.ok(!JSON.stringify(record.state).includes('hidden-constraint'));
+  assert.deepEqual(readFileSync(path), before);
+  assert.equal(statSync(out).mode & 0o777, 0o600);
+});
+
+test('v2 identifies a reconstructed compaction boundary and does not rewrite v1 snapshots', () => {
+  const { dir, path } = fixture();
+  const baseline = join(dir, 'baseline.jsonl'), explicit = join(dir, 'explicit-v1.jsonl');
+  assert.equal(run('extract', '--db', path, '--out', baseline).status, 0);
+  assert.equal(run('extract', '--db', path, '--out', explicit, '--state-version', '1').status, 0);
+  assert.deepEqual(readFileSync(explicit), readFileSync(baseline));
+  const v1 = JSON.parse(readFileSync(baseline, 'utf8')).state;
+  assert.ok(!Object.hasOwn(v1, 'version'));
+  assert.deepEqual(v1.coverage, { omittedEntries: 0, toolContentsExcluded: true, historicalContextReconstructed: true });
+  const db = new DatabaseSync(path);
+  db.prepare("UPDATE session_message SET type = 'compaction', data = ? WHERE id = 'root-1'").run(JSON.stringify({ status: 'completed', summary: 'Scope inherited from an earlier request; keep ' + 'x'.repeat(3100) }));
+  db.close();
+  const out = join(dir, 'v2-summary.jsonl');
+  assert.equal(run('extract', '--db', path, '--out', out, '--state-version', '2').status, 0);
+  const v2 = JSON.parse(readFileSync(out, 'utf8')).state;
+  assert.equal(v2.recent[0].role, 'summary');
+  assert.equal(v2.recent[0].loss.textClipped, true);
+  assert.equal(v2.coverage.sourceHistory.startsAt, 'compaction-summary');
+  assert.equal(v2.coverage.sourceHistory.originalTaskScope, 'not-verified');
+  assert.equal(v2.coverage.omittedEntries, 0);
+  assert.equal(v2.coverage.textClippedEntries, 1);
+  assert.match(run('extract', '--db', path, '--out', join(dir, 'bad-version.jsonl'), '--state-version', '3').stderr, /state-version must be/);
+});
+
 function runAsync(...args) {
   return new Promise(resolve => {
     const child = spawn(process.execPath, [cli, ...args]);
@@ -494,4 +544,124 @@ test('Decisions bounds requests, forbids redirects and classifies transport erro
     await new Promise(resolve => server.close(resolve));
     await new Promise(resolve => destination.close(resolve));
   }
+});
+
+const checkpointAxes = {
+  scope: ['sufficient', 'insufficient', 'unclear'],
+  obligation: ['settled', 'owed', 'unclear'],
+  preservation: ['recoverable', 'unrecoverable', 'unclear'],
+  consistency: ['current', 'conflicting', 'unclear'],
+};
+
+async function checkpointFixture(judge, callback) {
+  const { dir } = fixture(), corpus = join(dir, 'corpus.jsonl'), keyFile = join(dir, 'key');
+  const secret = 'fixture-checkpoint-key';
+  const record = { id: 'checkpoint', inputTokens: 99000, contextLimit: 100000,
+    state: { version: 2, recent: [{ role: 'assistant', text: 'Task paused; note saved and read back. ' + secret }],
+      coverage: { omittedEntries: 0, textClippedEntries: 0, toolContentsExcluded: true } },
+    review: { nextUser: 'PRIVATE FUTURE' }, design: { intendedDecision: 'PRIVATE DESIGN' } };
+  writeFileSync(corpus, JSON.stringify(record));
+  writeFileSync(keyFile, secret, { mode: 0o600 });
+  const requests = [], fixtureState = { overrides: {}, mutate: result => result };
+  const server = createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    requests.push(JSON.parse(body));
+    const answers = Object.entries(checkpointAxes).map(([name, names]) => {
+      const override = fixtureState.overrides[name] ?? {};
+      const choice = override.choice ?? names[0], confidence = override.confidence ?? 0.96;
+      const p = override.probabilities ?? Object.fromEntries(names.map(n => [n, n === choice ? confidence : (1 - confidence) / 2]));
+      return { name, type: 'choice', choice, confidence,
+        probabilities: judge === 'jev' ? p : Object.entries(p).map(([value, probability]) => ({ value, probability })) };
+    });
+    const result = { model: judge === 'jev' ? 'jev-fixture' : 'gpt-6-luna',
+      usage: { input_tokens: 120, output_tokens: 0, ...(judge === 'decisions' ? { total_tokens: 120 } : {}) },
+      answers: judge === 'jev' ? Object.fromEntries(answers.map(({ name, ...answer }) => [name, answer])) : answers.toReversed() };
+    res.end(JSON.stringify(fixtureState.mutate(result)));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const endpoint = `http://127.0.0.1:${server.address().port}/v1/${judge === 'jev' ? 'systemone' : 'decisions'}`;
+  const args = ['predict', '--corpus', corpus, '--judge', judge, '--endpoint', endpoint, '--key-file', keyFile, '--recipe', 'checkpoint-v2', '--allow-remote', 'yes'];
+  try { await callback({ dir, corpus, record, args, requests, fixtureState, secret }); }
+  finally { await new Promise(resolve => server.close(resolve)); }
+}
+
+test('both providers expose an opt-in four-axis checkpoint recipe with a pressure-independent safety floor', async () => {
+  for (const judge of ['jev', 'decisions']) await checkpointFixture(judge, async ({ dir, args, requests, secret }) => {
+    const out = join(dir, 'safe.jsonl'), r = await runAsync(...args, '--out', out);
+    assert.equal(r.status, 0, r.stderr);
+    const p = JSON.parse(readFileSync(out, 'utf8'));
+    assert.equal(p.judge, `${judge}-v2:${judge === 'jev' ? 'jev-latest' : 'gpt-6-luna'}:checkpoint-v2`);
+    assert.equal(p.settings.recipe, 'checkpoint-v2');
+    assert.equal(p.decision, true);
+    assert.equal(p.assessment, 'safe');
+    assert.equal(p.score, 0.96);
+    assert.equal(p.floor, 0.9);
+    assert.deepEqual(p.blockedBy, []);
+    assert.equal(p.axes.obligation.choice, 'settled');
+    const body = requests[0], questions = judge === 'jev' ? Object.keys(body.questions) : body.questions.map(q => q.name);
+    assert.deepEqual(questions, ['scope', 'obligation', 'preservation', 'consistency']);
+    const serialized = JSON.stringify(body);
+    for (const privateText of [secret, 'PRIVATE FUTURE', 'PRIVATE DESIGN']) assert.ok(!serialized.includes(privateText));
+    assert.equal(statSync(out).mode & 0o777, 0o600);
+  });
+});
+
+test('v2 never trades a missing safety gate for high confidence on other axes or high context pressure', async () => {
+  for (const judge of ['jev', 'decisions']) await checkpointFixture(judge, async ({ dir, args, fixtureState }) => {
+    for (const [axis, names] of Object.entries(checkpointAxes)) {
+      for (const [choice, confidence, assessment] of [[names[1], 0.96, 'unsafe'], ['unclear', 0.96, 'uncertain'], [names[0], 0.89, 'uncertain']]) {
+        fixtureState.overrides = { [axis]: { choice, confidence } };
+        const out = join(dir, `${axis}-${choice}.jsonl`);
+        assert.equal((await runAsync(...args, '--out', out)).status, 0);
+        const p = JSON.parse(readFileSync(out, 'utf8'));
+        assert.equal(p.decision, false, `${axis}/${choice}`);
+        assert.equal(p.assessment, assessment);
+        assert.deepEqual(p.blockedBy, [axis]);
+        assert.equal(p.floor, 0.9);
+      }
+    }
+  });
+});
+
+test('v2 rejects missing, extra, malformed and refused axes without exposing provider contents', async () => {
+  for (const judge of ['jev', 'decisions']) await checkpointFixture(judge, async ({ dir, args, fixtureState }) => {
+    for (const mode of ['missing', 'extra', 'malformed', 'refusal']) {
+      fixtureState.mutate = result => {
+        result.diagnostic = 'PRIVATE PROVIDER CONTENTS';
+        if (judge === 'jev') {
+          if (mode === 'missing') delete result.answers.scope;
+          if (mode === 'extra') result.answers.injected = result.answers.scope;
+          if (mode === 'malformed') result.answers.preservation.probabilities.recoverable = 2;
+          if (mode === 'refusal') result.answers.consistency = { type: 'refusal' };
+        } else {
+          if (mode === 'missing') result.answers.pop();
+          if (mode === 'extra') result.answers.push({ ...result.answers[0], name: 'injected' });
+          if (mode === 'malformed') result.answers[0].probabilities[0].probability = 2;
+          if (mode === 'refusal') result.answers[0] = { name: result.answers[0].name, type: 'refusal' };
+        }
+        return result;
+      };
+      const out = join(dir, `${mode}.jsonl`), r = await runAsync(...args, '--out', out);
+      assert.equal(r.status, 0, r.stderr);
+      const p = JSON.parse(readFileSync(out, 'utf8'));
+      assert.equal(p.decision, null);
+      assert.equal(p.error, mode === 'refusal' && judge === 'decisions' ? 'refusal' : 'response');
+      assert.equal(p.settings.recipe, 'checkpoint-v2');
+      assert.ok(!Object.hasOwn(p, 'assessment'), 'failed transport/validation is not a semantic unsafe judgment');
+      assert.ok(!(r.stdout + r.stderr + readFileSync(out, 'utf8')).includes('PRIVATE PROVIDER CONTENTS'));
+    }
+  });
+});
+
+test('v2 recipe selection rejects unsupported combinations and still requires outbound consent', async () => {
+  await checkpointFixture('jev', async ({ dir, args, requests }) => {
+    const noConsent = args.slice(0, -2);
+    assert.match((await runAsync(...noConsent, '--out', join(dir, 'refused.jsonl'))).stderr, /consent/);
+    const unknown = args.map(value => value === 'checkpoint-v2' ? 'unknown-v3' : value);
+    assert.match((await runAsync(...unknown, '--out', join(dir, 'unknown.jsonl'))).stderr, /recipe must be/);
+    const rules = args.map(value => value === 'jev' ? 'rules' : value);
+    assert.match((await runAsync(...rules, '--out', join(dir, 'rules.jsonl'))).stderr, /only for jev or decisions/);
+    assert.equal(requests.length, 0);
+  });
 });

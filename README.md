@@ -18,6 +18,8 @@ outbound-data consent per run; no live judge accuracy has been measured yet.
 Decisions has fixture tests and three successful live pilot requests, but is
 not a selected replacement.
 Local comparisons are secondary, not a change to the chosen default.
+An opt-in **checkpoint-v2** question recipe and **state v2** extraction format
+are implemented for local contract testing; neither has hosted accuracy evidence.
 
 Requires Node.js 24 or newer. No dependencies or installation needed:
 
@@ -68,6 +70,33 @@ After completed compaction, extraction starts from the summary; it does not
 reconstruct the exact preserved recent tail, instruction baseline, reverts,
 pending inbox, provider-native encrypted items or synthetic messages. A
 checkpoint is a candidate for evaluation, not authorization to compact live.
+
+### Opt-in state v2
+
+Add `--state-version 2` to `extract` to expose loss within retained entries:
+
+```sh
+node src/cli.js extract --db ~/.local/share/opencode/opencode.db \
+  --out eval/data/checkpoints-v2.jsonl --state-version 2
+```
+
+`state.version: 2` adds per-entry `loss` flags for text clipping/redaction and
+counts of excluded tool statuses. Coverage aggregates these **retained-entry**
+losses separately from `omittedEntries`, which counts whole entries excluded by
+the byte budget. Text is still bounded to 3,000 characters for users/summaries
+and 6,000 for assistants; only the last 12 tool names/statuses are retained,
+with names bounded to 80 characters. Tool contents remain excluded.
+
+`coverage.sourceHistory` identifies a session-start or reconstructed
+compaction-summary boundary, but marks original task scope `not-verified` and
+provider context `approximation`. Neither zero omissions nor a session-start
+boundary proves the database contained the complete original request. The
+extractor does not inspect saved files, resolve external references or invent a
+host persistence contract (`compaction.persistence` stays `unknown`).
+
+Default extraction and explicit `--state-version 1` preserve the existing
+snapshot format. V2 changes fingerprints: use new output paths and review new
+snapshots separately, never reuse old labels or predictions against them.
 
 ## 2. Review and label
 
@@ -186,6 +215,57 @@ Before replacing Jev, compare matching checkpoint fingerprints using human
 safe/unsafe labels, measured latency, coverage and unsafe false positives.
 Do not tune the recipe and claim test accuracy on the same session families.
 
+### Opt-in checkpoint-v2 recipe
+
+Both hosted adapters support `--recipe checkpoint-v2`. Omitting it, or selecting
+`--recipe done-shape-v1`, retains the original questions, policy and identities.
+The recipe flag is not supported by rules, threshold, local or benchmark judges.
+
+```sh
+# Requires a separately approved, bounded outbound run; not a local-only check.
+node src/cli.js predict --corpus eval/data/checkpoints-v2.jsonl \
+  --out eval/results/jev-checkpoint-v2.jsonl --judge jev \
+  --recipe checkpoint-v2 --allow-remote yes \
+  --key-file ~/.config/opencode/compact-adviser.key --count 3
+```
+
+For Decisions, use `--judge decisions` and its private OpenAI key file. Consent,
+endpoint restrictions, redaction, sequential requests, timeouts and transport
+bounds are unchanged. State v2 and the recipe are independent options: the new
+questions can assess old snapshots, but missing loss metadata stays unknown.
+Compare providers or recipes on **matching fingerprints** to avoid confounding a
+question change with a state change.
+
+The four choice questions assess:
+
+| Axis | Required positive answer | What it distinguishes |
+| --- | --- | --- |
+| `scope` | `sufficient` | Current authoritative scope versus missing/clipped requirements; recoverable canonical checklists can supply omitted details. |
+| `obligation` | `settled` | No authorized executable step owed now versus unfinished required work; explicit pauses/cancellations differ from stale promises. |
+| `preservation` | `recoverable` | Current persistent, discoverable continuation evidence versus conversational-only notes or changed floating references. |
+| `consistency` | `current` | Latest instructions and operation status versus stale handoffs or contradictory completion claims. |
+
+Every axis also has a negative answer and `unclear`. A recommendation requires
+**all four positive choices with probability at least 0.9 each**. This fixed
+experimental floor does not decline with context pressure. `score` is the
+minimum positive-axis probability, **not a calibrated joint safety probability**.
+
+V2 predictions retain validated `axes` (choices/probabilities), `blockedBy` axis
+names and an `assessment`: `safe` if all gates pass; `unsafe` if any negative
+choice has probability at least 0.9; otherwise `uncertain`. Both unsafe and
+uncertain mean `decision: false`. Transport errors, refusals or malformed answers
+remain `decision: null` with a categorized error, not a semantic judgment.
+Identities are `jev-v2:jev-latest:checkpoint-v2` and
+`decisions-v2:gpt-6-luna:checkpoint-v2`; v1 predictions are never reinterpreted.
+
+The recipe was informed by 21 fictional checkpoints reviewed blindly by Opus
+and Fable. Their agreement is provisional AI evidence, not human ground truth.
+Local fixtures cover the policy gates and request/response contracts; replaying
+those 21 inputs through canned responses checks transport only, not whether
+either provider answers the new questions correctly. No hosted v2 trial has
+been run. Human-reviewed natural checkpoints and controlled continuation after
+native compaction are still needed before a default or safety claim changes.
+
 ### Optional local comparisons
 
 ```sh
@@ -300,6 +380,9 @@ They also cover Jev consent, key scrubbing, atomic judgments and fail-closed
 response validation. Decisions fixtures cover matching question translation,
 reordered named answers, refusals, duplicate/invalid distributions, private
 credentials, input/response bounds, redirect rejection and transport failures.
+V2 fixtures cover retained-entry clipping/redaction, unknown source completeness,
+compaction-summary provenance, unchanged v1 state, four-axis question translation,
+fixed-floor gates, uncertain/unsafe distinction and malformed/refused axes.
 They do not establish real model accuracy or live IDE
 compatibility.
 
@@ -308,7 +391,8 @@ outputs, future-data exclusion, invalid probabilities, input-limit abstentions,
 truncation rejection, worker exits and timeouts. They do not download or load
 real weights during `npm run check`.
 
-Next: reviewed labels and explicitly approved Jev runs, then live lifecycle
+Next: reviewed natural checkpoints and explicitly approved, matching-fingerprint
+v1/v2 hosted comparisons, then live lifecycle
 coordination and independently verified adapters for OpenCode/OpenChamber, Claude Code,
 Codex, Cursor and oh-my-pi. Auto-compaction must be opt-in and capability-gated;
 hosts without a supported external compact operation must remain hint-only.

@@ -1,11 +1,6 @@
 import { readFileSync, lstatSync } from 'node:fs';
 import { questions } from './jev.js';
-
-// Keep the question recipe fixed for the first provider comparison.
-const decisionQuestions = Object.entries(questions).map(([name, question]) => ({
-  name, type: 'choice', instructions: question.instructions,
-  choices: Object.entries(question.criteria).map(([value, description]) => ({ value, description })),
-}));
+import { checkpointQuestions, scoreCheckpoint } from './checkpoint.js';
 
 function failure(kind, httpStatus) { return Object.assign(new Error(kind), { kind, httpStatus }); }
 function probability(n) { return typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1; }
@@ -44,7 +39,12 @@ function choice(answer, names) {
   return Object.fromEntries(values);
 }
 
-export async function judgeDecisions(record, configuration, timeout) {
+export async function judgeDecisions(record, configuration, timeout, recipe = 'done-shape-v1') {
+  const selectedQuestions = recipe === 'checkpoint-v2' ? checkpointQuestions : questions;
+  const decisionQuestions = Object.entries(selectedQuestions).map(([name, question]) => ({
+    name, type: 'choice', instructions: question.instructions,
+    choices: Object.entries(question.criteria).map(([value, description]) => ({ value, description })),
+  }));
   const signal = AbortSignal.timeout(timeout);
   try {
     const input = JSON.stringify(record.state, (_, value) => typeof value === 'string'
@@ -81,8 +81,16 @@ export async function judgeDecisions(record, configuration, timeout) {
       || !Array.isArray(judgment.answers) || judgment.answers.length !== decisionQuestions.length) throw failure('response');
     const answers = new Map();
     for (const answer of judgment.answers) {
-      if (!answer || !Object.hasOwn(questions, answer.name) || answers.has(answer.name)) throw failure('response');
+      if (!answer || !Object.hasOwn(selectedQuestions, answer.name) || answers.has(answer.name)) throw failure('response');
       answers.set(answer.name, answer);
+    }
+    if (recipe === 'checkpoint-v2') {
+      const validated = Object.fromEntries(Object.entries(selectedQuestions).map(([name, question]) => {
+        const answer = answers.get(name);
+        return [name, { choice: answer?.choice, probabilities: choice(answer, Object.keys(question.criteria)) }];
+      }));
+      return { ...scoreCheckpoint(validated), resolvedModel: judgment.model,
+        usage: { input: judgment.usage.input_tokens, output: judgment.usage.output_tokens } };
     }
     const done = choice(answers.get('done'), Object.keys(questions.done.criteria));
     const shape = choice(answers.get('shape'), Object.keys(questions.shape.criteria));

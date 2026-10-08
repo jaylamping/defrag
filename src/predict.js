@@ -37,6 +37,9 @@ Return exactly a JSON object with one boolean property: {"safe":true} or {"safe"
 
 export async function predict(records, options) {
   if (!['rules', 'threshold', 'local', 'jev', 'decisions'].includes(options.judge)) throw new Error('judge must be rules, threshold, local, jev or decisions');
+  const recipe = options.recipe ?? 'done-shape-v1';
+  if (!['done-shape-v1', 'checkpoint-v2'].includes(recipe)) throw new Error('recipe must be done-shape-v1 or checkpoint-v2');
+  if (options.recipe && !['jev', 'decisions'].includes(options.judge)) throw new Error('recipe is supported only for jev or decisions');
   const jev = options.judge === 'jev' ? configureJev(options) : null;
   const decisions = options.judge === 'decisions' ? configureDecisions(options) : null;
   const endpoint = options.judge === 'local' ? loopback(options.endpoint) : null;
@@ -51,9 +54,10 @@ export async function predict(records, options) {
     let decision = null, error, usage, details = {};
     try {
       if (jev || decisions) {
-        const result = jev ? await judgeJev(record, jev, timeout) : await judgeDecisions(record, decisions, timeout);
+        const result = jev ? await judgeJev(record, jev, timeout, recipe) : await judgeDecisions(record, decisions, timeout, recipe);
         ({ decision, usage } = result);
-        details = { score: result.score, floor: result.floor, resolvedModel: result.resolvedModel };
+        details = { score: result.score, floor: result.floor, resolvedModel: result.resolvedModel,
+          ...(recipe === 'checkpoint-v2' ? { assessment: result.assessment, axes: result.axes, blockedBy: result.blockedBy } : {}) };
       } else if (options.judge === 'threshold') {
         if (!(record.contextLimit > 0) || !Number.isFinite(record.inputTokens)) throw new Error('unknown-context-limit');
         decision = record.inputTokens >= record.contextLimit * threshold;
@@ -84,9 +88,10 @@ export async function predict(records, options) {
       if (Number.isInteger(e.httpStatus)) details.httpStatus = e.httpStatus;
     }
     predictions.push({ version: 1, id: record.id, fingerprint: fingerprint(record),
-      judge: jev ? 'jev-v1:jev-latest' : decisions ? 'decisions-v1:gpt-6-luna:done-shape-v1' : options.judge === 'local' ? `local-v1:${options.model}` : options.judge === 'threshold' ? `threshold-v1:${threshold}` : 'rules-v1',
+      judge: (jev || decisions) && recipe === 'checkpoint-v2' ? `${options.judge}-v2:${jev ? 'jev-latest' : decisions.model}:checkpoint-v2`
+        : jev ? 'jev-v1:jev-latest' : decisions ? 'decisions-v1:gpt-6-luna:done-shape-v1' : options.judge === 'local' ? `local-v1:${options.model}` : options.judge === 'threshold' ? `threshold-v1:${threshold}` : 'rules-v1',
       decision, ...details, ...(error ? { error } : {}), ...(usage ? { usage } : {}), latencyMs: Math.round(performance.now() - started),
-      settings: { ...(jev ? { endpoint: jev.endpoint, model: 'jev-latest', timeout } : {}), ...(decisions ? { endpoint: decisions.endpoint, model: decisions.model, recipe: 'done-shape-v1', timeout } : {}), ...(endpoint ? { endpoint, model: options.model, timeout } : {}), ...(options.judge === 'threshold' ? { threshold } : {}) } });
+      settings: { ...(jev ? { endpoint: jev.endpoint, model: 'jev-latest', timeout, ...(recipe === 'checkpoint-v2' ? { recipe } : {}) } : {}), ...(decisions ? { endpoint: decisions.endpoint, model: decisions.model, recipe, timeout } : {}), ...(endpoint ? { endpoint, model: options.model, timeout } : {}), ...(options.judge === 'threshold' ? { threshold } : {}) } });
   }
   return predictions;
 }

@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from 'node:fs';
+import { checkpointQuestions, scoreCheckpoint } from './checkpoint.js';
 
 // Questions and default scoring policy adapted from compact-adviser ef216af.
 // See THIRD_PARTY_NOTICES.md. No upstream runtime is loaded.
@@ -41,14 +42,15 @@ function choice(value, names) {
   return p;
 }
 
-export async function judgeJev(record, configuration, timeout) {
+export async function judgeJev(record, configuration, timeout, recipe = 'done-shape-v1') {
+  const selectedQuestions = recipe === 'checkpoint-v2' ? checkpointQuestions : questions;
   const signal = AbortSignal.timeout(timeout);
   try {
     // No reviewer/future data. Scrub the known key even when it was mentioned
     // without a recognizable credential prefix in historical conversation.
     const state = JSON.parse(JSON.stringify(record.state, (_, value) => typeof value === 'string'
       ? value.split(configuration.key).join('[REDACTED]') : value));
-    const body = JSON.stringify({ model: 'jev-latest', state, questions });
+    const body = JSON.stringify({ model: 'jev-latest', state, questions: selectedQuestions });
     if (Buffer.byteLength(body) > 32000) throw failure('input');
     const response = await fetch(configuration.endpoint, { method: 'POST', redirect: 'error', signal,
       headers: { 'content-type': 'application/json', authorization: `Bearer ${configuration.key}` }, body });
@@ -77,6 +79,15 @@ export async function judgeJev(record, configuration, timeout) {
     if (!judgment || typeof judgment.model !== 'string' || !/^[\w.:/-]{1,100}$/.test(judgment.model)
         || !Number.isSafeInteger(judgment.usage?.input_tokens) || judgment.usage.input_tokens < 0
         || !Number.isSafeInteger(judgment.usage?.output_tokens) || judgment.usage.output_tokens < 0) throw failure('response');
+    if (recipe === 'checkpoint-v2') {
+      if (!judgment.answers || Object.keys(judgment.answers).sort().join() !== Object.keys(selectedQuestions).sort().join()) throw failure('response');
+      const answers = Object.fromEntries(Object.entries(selectedQuestions).map(([name, question]) => {
+        const answer = judgment.answers[name];
+        return [name, { choice: answer?.choice, probabilities: choice(answer, Object.keys(question.criteria)) }];
+      }));
+      return { ...scoreCheckpoint(answers), resolvedModel: judgment.model,
+        usage: { input: judgment.usage.input_tokens, output: judgment.usage.output_tokens } };
+    }
     const done = choice(judgment.answers?.done, Object.keys(questions.done.criteria));
     const shape = choice(judgment.answers?.shape, Object.keys(questions.shape.criteria));
     const score = done.finished * (0.5 + 0.5 * shape.hands_on);

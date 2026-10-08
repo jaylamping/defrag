@@ -10,11 +10,11 @@ import { benchmark } from './benchmark.js';
 const [command, ...args] = process.argv.slice(2);
 const options = {};
 const allowed = {
-  extract: ['db', 'out', 'minimum', 'context-limit', 'limits'],
+  extract: ['db', 'out', 'minimum', 'context-limit', 'limits', 'state-version'],
   review: ['corpus', 'out', 'count'],
   label: ['corpus', 'out', 'id', 'decision', 'reviewer', 'note'],
   score: ['corpus', 'labels', 'predictions', 'out'],
-  predict: ['corpus', 'out', 'judge', 'endpoint', 'model', 'threshold', 'timeout', 'count', 'allow-remote', 'key-file'],
+  predict: ['corpus', 'out', 'judge', 'endpoint', 'model', 'threshold', 'timeout', 'count', 'allow-remote', 'key-file', 'recipe'],
   bench: ['corpus', 'out', 'manifest', 'candidate', 'runtime', 'worker', 'repeats', 'count', 'timeout', 'device'],
 };
 try {
@@ -33,7 +33,7 @@ try {
   }
   if (command === 'extract') {
     if (!options.db || !options.out) throw new Error('extract requires --db and --out');
-    const records = extract(options.db, { minimum: positiveInteger(options.minimum, 40000), contextLimit: positiveInteger(options['context-limit'], null), limits: options.limits ? readJSON(options.limits) : {} });
+    const records = extract(options.db, { minimum: positiveInteger(options.minimum, 40000), contextLimit: positiveInteger(options['context-limit'], null), limits: options.limits ? readJSON(options.limits) : {}, stateVersion: options['state-version'] ?? '1' });
     writeLines(options.out, records);
     console.log(JSON.stringify({ checkpoints: records.length, reviewed: 0, output: options.out }));
   } else if (command === 'label') {

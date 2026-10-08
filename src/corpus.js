@@ -8,13 +8,17 @@ export function redact(text) {
     .replace(/\b([A-Z_]*(?:API_KEY|TOKEN|SECRET|PASSWORD))\s*[=:]\s*["']?[^\s"',}]+/g, '$1=[REDACTED]');
 }
 
-function snapshot(messages) {
+function snapshot(messages, stateVersion, startsAt) {
   // Text only. Tool input/output and hidden reasoning are deliberately excluded.
   const entries = messages.filter(m => ['user', 'assistant', 'compaction'].includes(m.type)).map(m => {
-    if (m.type === 'user') return { role: 'user', text: redact(m.text).slice(0, 3000) };
-    if (m.type === 'compaction') return { role: 'summary', text: redact(m.summary).slice(0, 3000) };
-    return { role: 'assistant', text: redact((m.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('\n')).slice(0, 6000),
-      tools: (m.content ?? []).filter(p => p.type === 'tool').slice(-12).map(p => ({ name: redact(p.name).slice(0, 80), status: p.state?.status })) };
+    const original = String(m.type === 'user' ? m.text ?? '' : m.type === 'compaction' ? m.summary ?? ''
+      : (m.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('\n'));
+    const text = redact(original), limit = m.type === 'assistant' ? 6000 : 3000;
+    const tools = (m.content ?? []).filter(p => p.type === 'tool');
+    return { role: m.type === 'compaction' ? 'summary' : m.type, text: text.slice(0, limit),
+      ...(m.type === 'assistant' ? { tools: tools.slice(-12).map(p => ({ name: redact(p.name).slice(0, 80), status: p.state?.status })) } : {}),
+      ...(stateVersion === '2' ? { loss: { textClipped: text.length > limit, redacted: text !== original,
+        omittedToolStatuses: m.type === 'assistant' ? Math.max(0, tools.length - 12) : 0 } } : {}) };
   });
   const recent = [];
   let bytes = 0;
@@ -24,11 +28,19 @@ function snapshot(messages) {
     recent.unshift(entry);
     bytes += size;
   }
-  return { recent, coverage: { omittedEntries: entries.length - recent.length, toolContentsExcluded: true,
-    historicalContextReconstructed: true }, compaction: { description: 'Host-native compaction is lossy; preserve active work and constraints.' } };
+  return { ...(stateVersion === '2' ? { version: 2 } : {}), recent,
+    coverage: { omittedEntries: entries.length - recent.length, toolContentsExcluded: true,
+      historicalContextReconstructed: true, ...(stateVersion === '2' ? {
+        textClippedEntries: recent.filter(e => e.loss.textClipped).length,
+        redactedEntries: recent.filter(e => e.loss.redacted).length,
+        omittedToolStatuses: recent.reduce((n, e) => n + e.loss.omittedToolStatuses, 0),
+        sourceHistory: { startsAt, originalTaskScope: 'not-verified', providerContext: 'approximation' },
+      } : {}) }, compaction: { description: 'Host-native compaction is lossy; preserve active work and constraints.',
+        ...(stateVersion === '2' ? { persistence: 'unknown' } : {}) } };
 }
 
-export function extract(path, { minimum = 40000, contextLimit = null, limits = {} } = {}) {
+export function extract(path, { minimum = 40000, contextLimit = null, limits = {}, stateVersion = '1' } = {}) {
+  if (!['1', '2'].includes(stateVersion)) throw new Error('state-version must be 1 or 2');
   const db = new DatabaseSync(path, { readOnly: true });
   const records = [];
   try {
@@ -73,7 +85,7 @@ export function extract(path, { minimum = 40000, contextLimit = null, limits = {
         if (limit !== null && (!Number.isSafeInteger(limit) || limit <= 0)) throw new Error('Invalid model context limit');
         records.push({ version: 1, id, group: createHash('sha256').update(groupRoot(session.id)).digest('hex').slice(0, 16),
           host: 'opencode-v2', model: last.model, inputTokens, contextLimit: limit,
-          contextLimitSource: limit === null ? 'unknown' : 'user-supplied-not-historical', state: snapshot(prior), label: null,
+          contextLimitSource: limit === null ? 'unknown' : 'user-supplied-not-historical', state: snapshot(prior, stateVersion, messages[boundary]?.type === 'compaction' ? 'compaction-summary' : 'session-start'), label: null,
           review: { nextUser: next ? redact(next.text).slice(0, 6000) : null,
             suggestion: next ? 'needs-review' : 'no-follow-up', note: 'Future text is review-only, never judge input. No follow-up is not a safe label.' } });
       }
