@@ -1,6 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -51,6 +51,7 @@ test('local plugin import registers a current-session preview without credential
   const p = JSON.parse(result.content);
   assert.equal(p.mode, 'local-preview');
   assert.equal(p.hostedCalls, 0);
+  assert.ok(!Object.hasOwn(p, 'telemetry'), 'default preview must not enable logging');
   assert.equal(p.advisoryOnly, true);
   assert.equal(p.compactionRequested, false);
   assert.equal(p.stateVersion, 3);
@@ -346,7 +347,7 @@ test('package import contents include the plugin entrypoint and exclude private 
   });
   assert.equal(result.status, 0, 'package dry-run must succeed');
   const files = JSON.parse(result.stdout)[0].files.map(f => f.path);
-  for (const required of ['index.js', 'src/opencode.js', 'src/corpus.js', 'src/jev.js', 'package.json', 'LICENSE']) assert.ok(files.includes(required));
+  for (const required of ['index.js', 'src/opencode.js', 'src/corpus.js', 'src/jev.js', 'src/telemetry.js', 'package.json', 'LICENSE']) assert.ok(files.includes(required));
   assert.ok(files.every(path => ['index.js', 'package.json', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'].includes(path)
     || /^src\/[^/]+\.js$/.test(path)), 'only public runtime source and package documentation may be packed');
 });
@@ -417,4 +418,143 @@ test('v4 hosted fixtures omit opaque retained bodies but still invalidate change
     assert.equal(changed.error, 'stale-context');
     assert.equal(changed.decision, null);
   });
+});
+
+function telemetryDirectory() {
+  const root = mkdtempSync(join(tmpdir(), 'defrag-plugin-telemetry-'));
+  temporary.push(root);
+  return join(root, 'logs');
+}
+
+const telemetryEvents = directory => readdirSync(directory).flatMap(file =>
+  readFileSync(join(directory, file), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse));
+
+test('opt-in plugin preview telemetry logs metadata without extra session reads, credentials or raw state', async () => {
+  const directory = telemetryDirectory();
+  const { tools, reads, invocation, cleanup } = await load({ telemetry: { directory }, stateVersion: 4 });
+  const result = JSON.parse((await tools.get('defrag_preview').execute({}, invocation)).content);
+  assert.equal(result.telemetry.accepted, true);
+  assert.equal(result.telemetry.state, 'active');
+  assert.equal(result.hostedCalls, 0);
+  assert.equal(reads.length, 2);
+  await cleanup();
+  const [event] = telemetryEvents(directory);
+  assert.equal(event.eventID, result.telemetry.eventID);
+  assert.equal(event.target, 'none');
+  assert.equal(event.snapshot.fingerprint, result.fingerprint);
+  assert.equal(event.snapshot.encodedStateBytes, result.encodedStateBytes);
+  assert.equal(event.snapshot.latestRequest.status, 'available');
+  assert.ok(event.durationMs >= 0);
+  assert.ok(event.timings.captureMs >= 0);
+  for (const forbidden of ['PRIVATE', 'fictional-secret', 'diagnostic question', invocation.sessionID, directory]) {
+    assert.ok(!JSON.stringify(event).includes(forbidden));
+  }
+});
+
+test('plugin telemetry records accepted, stale, failed and busy checks without new inference or exposing discarded judgments as accepted', async () => {
+  await hostedFixture(async ({ options, requests, key, control }) => {
+    const directory = telemetryDirectory();
+    const { tools, messages, reads, invocation, cleanup } = await load({ ...options, telemetry: { directory } });
+    messages.at(-1).content[0].name = 'defrag_check';
+    const check = tools.get('defrag_check');
+    const accepted = JSON.parse((await check.execute({}, invocation)).content);
+    assert.equal(accepted.decision, true);
+    assert.equal(reads.length, 4, 'telemetry must not recapture the session');
+    control.onRequest = () => { messages.at(-2).text = 'PRIVATE NEW REQUEST'; };
+    const stale = JSON.parse((await check.execute({}, invocation)).content);
+    assert.equal(stale.error, 'stale-context');
+    assert.ok(!Object.hasOwn(stale, 'axes'));
+    control.onRequest = undefined;
+    control.status = 429;
+    const failed = JSON.parse((await check.execute({}, invocation)).content);
+    assert.equal(failed.error, 'rate-limit');
+    messages.at(-1).content.push({ type: 'tool', id: 'another', name: 'shell', state: { status: 'running' } });
+    const busy = JSON.parse((await check.execute({}, invocation)).content);
+    assert.equal(busy.error, 'busy');
+    assert.equal(requests.length, 3, 'no telemetry request, retry or fallback');
+    await cleanup();
+    const events = telemetryEvents(directory);
+    assert.equal(events.length, 4);
+    assert.equal(events[0].result.decision, true);
+    assert.equal(events[0].target, 'loopback-fixture');
+    assert.equal(events[0].hostedCalls, 1);
+    assert.deepEqual(events[0].result.usage, { input: 100, output: 50 });
+    assert.ok(events[0].snapshot.encodedStateBytes > 0);
+    assert.ok(events[0].timings.judgeMs >= 0);
+    assert.equal(events[1].error, 'stale-context');
+    assert.equal(events[1].result.decision, null);
+    assert.equal(events[1].discardedJudgment.decision, true);
+    assert.deepEqual(events[1].discardedJudgment.usage, { input: 100, output: 50 });
+    assert.equal(events[2].error, 'rate-limit');
+    assert.equal(events[2].httpStatus, 429);
+    assert.equal(events[3].hostedCalls, 0);
+    assert.equal(events[3].error, 'busy');
+    for (const forbidden of ['PRIVATE', key, 'fictional-secret', invocation.sessionID, directory]) {
+      assert.ok(!JSON.stringify(events).includes(forbidden));
+    }
+  });
+});
+
+test('failed telemetry initialization never changes preview decisions or returns private filesystem diagnostics', async () => {
+  const directory = telemetryDirectory();
+  mkdirSync(directory); chmodSync(directory, 0o755);
+  const { tools, invocation, cleanup } = await load({ telemetry: { directory } });
+  const result = JSON.parse((await tools.get('defrag_preview').execute({}, invocation)).content);
+  assert.equal(result.mode, 'local-preview');
+  assert.ok(!Object.hasOwn(result, 'error'));
+  assert.equal(result.telemetry.state, 'unavailable');
+  assert.equal(result.telemetry.accepted, false);
+  assert.ok(!JSON.stringify(result).includes(directory));
+  assert.equal(readdirSync(directory).length, 0);
+  await cleanup();
+});
+
+test('telemetry records caller cancellation without retrying or copying diagnostics', async () => {
+  await hostedFixture(async ({ options, requests, control }) => {
+    const directory = telemetryDirectory();
+    const { tools, messages, invocation, cleanup } = await load({ ...options, telemetry: { directory } });
+    messages.at(-1).content[0].name = 'defrag_check';
+    const controller = new AbortController();
+    control.onRequest = async (_, response) => {
+      const closed = new Promise(resolve => response.once('close', resolve));
+      controller.abort();
+      await closed;
+    };
+    const result = JSON.parse((await tools.get('defrag_check').execute({}, { ...invocation, signal: controller.signal })).content);
+    assert.equal(result.error, 'cancelled');
+    assert.equal(requests.length, 1);
+    await cleanup();
+    const [event] = telemetryEvents(directory);
+    assert.equal(event.error, 'cancelled');
+    assert.equal(event.result.decision, null);
+    assert.ok(event.timings.judgeMs >= 0);
+  });
+});
+
+test('a blocked telemetry file write cannot hold up the actual preview tool result', { timeout: 2000 }, async t => {
+  const { open } = await import('node:fs/promises');
+  const directory = telemetryDirectory();
+  const probe = await open(join(directory, '..', 'prototype-probe'), 'wx', 0o600);
+  const prototype = Object.getPrototypeOf(probe), originalWrite = prototype.writeFile;
+  await probe.close();
+  let release, started, finished;
+  const gate = new Promise(resolve => { release = resolve; });
+  const writing = new Promise(resolve => { started = resolve; });
+  const written = new Promise(resolve => { finished = resolve; });
+  t.after(() => { prototype.writeFile = originalWrite; release(); });
+  prototype.writeFile = async function (...args) {
+    started();
+    await gate;
+    const result = await originalWrite.apply(this, args);
+    finished();
+    return result;
+  };
+  const { tools, invocation, cleanup } = await load({ telemetry: { directory } });
+  const result = JSON.parse((await tools.get('defrag_preview').execute({}, invocation)).content);
+  assert.equal(result.telemetry.accepted, true, 'tool must return before the blocked write is released');
+  await writing;
+  await cleanup();
+  release();
+  await written;
+  assert.equal(telemetryEvents(directory).length, 1);
 });

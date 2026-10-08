@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
-for (const { remoteEnabled, stateVersion } of [false, true].flatMap(remoteEnabled => [3, 4].map(stateVersion => ({ remoteEnabled, stateVersion })))) {
-  test(`OpenCode V2 loads the local plugin with remoteEnabled=${remoteEnabled}, stateVersion=${stateVersion} in an isolated server`,
+for (const { remoteEnabled, stateVersion, telemetryEnabled } of [false, true].flatMap(remoteEnabled => [3, 4].flatMap(stateVersion =>
+  [false, true].map(telemetryEnabled => ({ remoteEnabled, stateVersion, telemetryEnabled }))))) {
+  test(`OpenCode V2 loads the local plugin with remoteEnabled=${remoteEnabled}, stateVersion=${stateVersion}, telemetry=${telemetryEnabled} in an isolated server`,
     { skip: !process.env.DEFRAG_OPENCODE_BIN, timeout: 30000 }, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'defrag-host-'));
       const root = new URL('../', import.meta.url).pathname;
@@ -24,7 +25,8 @@ for (const { remoteEnabled, stateVersion } of [false, true].flatMap(remoteEnable
         }
       } };`, { mode: 0o600 });
       writeFileSync(join(dir, 'opencode.json'), JSON.stringify({ $schema: 'https://opencode.ai/config.json',
-        plugins: [{ package: root, options: { remoteEnabled, keyFile, stateVersion } }, probe],
+        plugins: [{ package: root, options: { remoteEnabled, keyFile, stateVersion,
+          ...(telemetryEnabled ? { telemetry: { directory: join(dir, 'logs') } } : {}) } }, probe],
         permissions: [{ action: '*', resource: '*', effect: 'allow' }],
         warming: false, compaction: { auto: false } }), { mode: 0o600 });
       // No inherited provider credentials or real configuration/service paths.
@@ -65,6 +67,15 @@ for (const { remoteEnabled, stateVersion } of [false, true].flatMap(remoteEnable
         assert.equal(plugin.features.server, true);
         assert.equal(routing?.id, 'defrag-routing-probe');
         assert.equal(routing.state.status, 'active', 'actual host registrations must keep the observers outside Code Mode');
+        if (telemetryEnabled) {
+          assert.equal(statSync(join(dir, 'logs')).mode & 0o777, 0o700);
+          const logs = readdirSync(join(dir, 'logs'));
+          assert.ok(logs.length > 0, 'each host-created plugin instance owns its own file');
+          for (const file of logs) {
+            assert.equal(statSync(join(dir, 'logs', file)).mode & 0o777, 0o600);
+            assert.equal(statSync(join(dir, 'logs', file)).size, 0, 'loading must not log session content or run checks');
+          }
+        }
         const { data: session } = request('/api/session', { title: 'Local permission fixture', location: { directory: dir } });
         assert.match(session.id, /^ses/);
         const permission = request(`/api/session/${session.id}/permission`, { action: 'defrag.remote', resources: ['*'] });

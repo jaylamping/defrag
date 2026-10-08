@@ -121,7 +121,8 @@ attempts at most one judgment, without retries or fallback. Snapshot text leaves
 your machine and costs may apply; redaction is best-effort and private work or
 natural-language secrets can remain. The known Jev key is additionally scrubbed.
 
-Results are returned through normal tool output, not extra saved reports.
+Results are returned through normal tool output. No extra reports are saved unless
+local metadata telemetry is explicitly enabled (below).
 `decision`, `assessment`, `axes`, `blockedBy`, `score` and `floor` describe the
 experimental judge's answer, **not calibrated safety or permission to compact**.
 `hostedCalls` counts judge attempts; transport failures may not reach the provider.
@@ -154,6 +155,70 @@ OpenChamber under Allow All, without a permission prompt; it withheld compaction
 Live direct preview also worked. Ask-mode permission UI has not been tested.
 Try local preview first; native
 compaction continuation and human-reviewed accuracy are still unmeasured.
+
+### Optional lightweight local telemetry
+
+Add `telemetry` to the plugin's existing `options` to record metadata for a
+personal pilot. It works with preview-only or hosted checks independently;
+it does not enable Jev, change permissions or start automatic monitoring:
+
+```jsonc
+{
+  "package": "/absolute/path/to/defrag",
+  "options": {
+    "telemetry": {
+      "directory": "/absolute/path/to/defrag/eval/results/telemetry"
+    }
+  }
+}
+```
+
+Telemetry is disabled by default (`undefined` or `false`). The directory must
+be absolute, owned by the current user and private (`0700`); a missing directory
+is created privately. Symlink/non-directory targets and public directories are
+refused, without changing permissions on existing files. Each plugin instance
+creates an exclusive, private (`0600`) JSONL file. Keep logs under ignored
+`eval/results/` or outside the repository; never commit or upload them by default.
+
+One versioned event per tool invocation records time, total and phase latency,
+hashed session ID, snapshot fingerprint/encoded size, extraction-loss and
+request-availability flags, decisions/axis probabilities, blockers, resolved Jev
+model, reported token usage and bounded error categories/HTTP status. Logs
+distinguish loopback fixtures from hosted checks; discarded judgments are
+explicitly separate from accepted results. Missing measurements remain `null`.
+There is no conversation text, tool input/output, reasoning, key, endpoint,
+raw provider response or raw diagnostic. Metadata is still sensitive: session
+hashes and fingerprints are correlatable, not anonymous. Ordinary host session
+history is unaffected. User outcome notes and controlled continuations are still
+needed to assess judgment accuracy.
+
+`durationMs` measures the core operation through its completed result, before
+telemetry enqueue/output encoding; phase timings separate capture, judge and
+revalidation. They exclude asynchronous disk-drain time.
+
+Logging uses existing captures and results: no extra session reads, judge calls,
+retries or full-transcript copies. One bounded state encoding supplies the
+fingerprint/size; accepted checks reuse that fingerprint in the tool result.
+A small metadata projection is
+enqueued synchronously; JSON encoding and batched file writes run asynchronously
+and are **not awaited by the tool**. The queue holds at most 64 events and each
+record at most 4 KiB. Each instance stops logging at 8 MiB; reloads create new
+files, so this is not a directory-wide retention cap. No automatic deletion or
+rotation is performed. Queue saturation, file limits and write failures drop
+logs rather than block recommendations. Tool output includes a small `telemetry`
+receipt/status with an event ID, accepted/queued/written/dropped/error counts and
+state. Acceptance means queued, not persisted; later failures appear on subsequent
+invocations. Unload attempts a drain for at most 100 ms; crashes or slow writes
+can lose events. The log is best-effort observability, not an audit ledger.
+
+A paired synthetic benchmark on the development machine measured hosted-check
+median local execution at 0.553 ms without telemetry and 0.575 ms with it
+(600 samples per configuration, all 660 warm-up/measured events written).
+The pre-change baseline was 0.556 ms. These are near-zero-latency provider stubs,
+not live Jev timings; setup/drain waits were outside the measurement, and the
+roughly 0.02 ms overhead is not a portable performance guarantee. No additional
+network requests or context reads were made. Slow-writer tests independently
+verify that blocked IO cannot hold up event submission.
 
 ## 1. Extract checkpoints
 
@@ -726,7 +791,8 @@ DEFRAG_OPENCODE_BIN=opencode node --test test/opencode-host.test.js
 It starts and stops disposable V2 servers with isolated HOME/XDG configuration,
 data, cache and service state, no inherited provider credentials, and no model
 requests. It does not install the plugin into or restart your active service.
-The two host-loading tests are skipped by default when this variable is absent.
+The host-loading cases include telemetry disabled/enabled and are skipped by
+default when this variable is absent.
 
 Benchmark CLI fixtures also cover resident workers, offline flags, private
 outputs, future-data exclusion, invalid probabilities, input-limit abstentions,
