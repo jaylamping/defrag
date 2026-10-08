@@ -9,6 +9,7 @@ export function redact(text) {
 }
 
 function snapshot(messages, stateVersion, startsAt) {
+  const exposeLoss = stateVersion !== '1';
   // Text only. Tool input/output and hidden reasoning are deliberately excluded.
   const entries = messages.filter(m => ['user', 'assistant', 'compaction'].includes(m.type)).map(m => {
     const original = String(m.type === 'user' ? m.text ?? '' : m.type === 'compaction' ? m.summary ?? ''
@@ -17,7 +18,7 @@ function snapshot(messages, stateVersion, startsAt) {
     const tools = (m.content ?? []).filter(p => p.type === 'tool');
     return { role: m.type === 'compaction' ? 'summary' : m.type, text: text.slice(0, limit),
       ...(m.type === 'assistant' ? { tools: tools.slice(-12).map(p => ({ name: redact(p.name).slice(0, 80), status: p.state?.status })) } : {}),
-      ...(stateVersion === '2' ? { loss: { textClipped: text.length > limit, redacted: text !== original,
+      ...(exposeLoss ? { loss: { textClipped: text.length > limit, redacted: text !== original,
         omittedToolStatuses: m.type === 'assistant' ? Math.max(0, tools.length - 12) : 0 } } : {}) };
   });
   const recent = [];
@@ -28,19 +29,40 @@ function snapshot(messages, stateVersion, startsAt) {
     recent.unshift(entry);
     bytes += size;
   }
-  return { ...(stateVersion === '2' ? { version: 2 } : {}), recent,
+  const requestIndex = entries.findLastIndex(e => e.role === 'user');
+  const request = entries[requestIndex];
+  const buildState = () => ({ ...(exposeLoss ? { version: Number(stateVersion) } : {}), recent,
+    ...(stateVersion === '3' ? { latestRequest: request ? {
+      status: 'available', text: request.text,
+      loss: { textClipped: request.loss.textClipped, redacted: request.loss.redacted },
+      provenance: { source: 'user-message', sourceEntryIndex: requestIndex, startsAt,
+        retainedInRecent: recent.includes(request), authority: 'not-verified' },
+    } : { status: 'unavailable', reason: 'no-user-message-within-source-boundary',
+      provenance: { startsAt, authority: 'not-verified' } } } : {}),
     coverage: { omittedEntries: entries.length - recent.length, toolContentsExcluded: true,
-      historicalContextReconstructed: true, ...(stateVersion === '2' ? {
+      historicalContextReconstructed: true, ...(exposeLoss ? {
         textClippedEntries: recent.filter(e => e.loss.textClipped).length,
         redactedEntries: recent.filter(e => e.loss.redacted).length,
         omittedToolStatuses: recent.reduce((n, e) => n + e.loss.omittedToolStatuses, 0),
         sourceHistory: { startsAt, originalTaskScope: 'not-verified', providerContext: 'approximation' },
       } : {}) }, compaction: { description: 'Host-native compaction is lossy; preserve active work and constraints.',
-        ...(stateVersion === '2' ? { persistence: 'unknown' } : {}) } };
+        ...(exposeLoss ? { persistence: 'unknown' } : {}) } });
+  let state = buildState();
+  // V3 pins the request without growing the payload budget, including the extra
+  // escaping for string-input providers. Coverage describes only the rolling tail;
+  // the pin carries its own loss/provenance.
+  if (stateVersion === '3') {
+    while (Buffer.byteLength(JSON.stringify(JSON.stringify(state))) > 22000) {
+      if (!recent.length) throw new Error('State v3 exceeds payload bound');
+      recent.shift();
+      state = buildState();
+    }
+  }
+  return state;
 }
 
 export function extract(path, { minimum = 40000, contextLimit = null, limits = {}, stateVersion = '1' } = {}) {
-  if (!['1', '2'].includes(stateVersion)) throw new Error('state-version must be 1 or 2');
+  if (!['1', '2', '3'].includes(stateVersion)) throw new Error('state-version must be 1, 2 or 3');
   const db = new DatabaseSync(path, { readOnly: true });
   const records = [];
   try {

@@ -31,9 +31,12 @@ export function review(records) {
       return `${fence}text\n${text}\n${fence}`;
     };
     const history = r.state.recent.map(m => `### ${m.role}\n\n${literal(m.text)}\n`).join('\n');
+    const request = r.state.version === 3
+      ? `### Latest available user request (pinned evidence, not verified scope)\n\n${literal(JSON.stringify(r.state.latestRequest ?? { status: 'unknown' }, null, 2))}\n\n`
+      : '';
     return `## ${i + 1}. ${r.id}\n\nSession group: ${r.group}. Input tokens: ${r.inputTokens}.\n\n` +
       `Omitted entries: ${r.state.coverage?.omittedEntries ?? 'unknown'}. Tool contents and hidden reasoning are excluded.\n\n` +
-      history + `\n### Future follow-up (review only)\n\n${literal(r.review?.nextUser ?? '(none)')}\n\n` +
+      request + history + `\n### Future follow-up (review only)\n\n${literal(r.review?.nextUser ?? '(none)')}\n\n` +
       `Decision: ___\nReason: ___\n\n---\n\n`;
   }).join('');
 }

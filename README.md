@@ -99,6 +99,50 @@ Default extraction and explicit `--state-version 1` preserve the existing
 snapshot format. V2 changes fingerprints: use new output paths and review new
 snapshots separately, never reuse old labels or predictions against them.
 
+### Opt-in state v3: pinned latest request
+
+```sh
+node src/cli.js extract --db ~/.local/share/opencode/opencode.db \
+  --out eval/data/checkpoints-v3.jsonl --state-version 3
+```
+
+V3 retains v2 loss/provenance metadata and adds `state.latestRequest` separately
+from `recent`. It pins the latest available **user message within the current
+source boundary**, even when that message falls out of the rolling tail.
+`status: available` means a message was found, not that it contains the complete
+task scope or is the sole authoritative instruction. Its text uses the same
+redaction and 3,000-character clipping rules; its own `loss` flags expose both.
+
+`provenance` records the source-entry index (zero-based within the boundary),
+session-start/compaction-summary boundary, whether the message also appears in
+`recent`, and unverified authority. No database message IDs are exposed. If no
+user message exists within that boundary, the pin is explicitly `unavailable`
+with reason `no-user-message-within-source-boundary`. The extractor does not
+resurrect pre-compaction requests, treat a summary as a user message, or use
+future follow-ups. An empty latest message stays empty rather than falling back
+to an older request. Earlier constraints may still be material and missing.
+
+V3's entire state is bounded to 22,000 bytes, including metadata, the pin and
+any duplicate request in `recent`, even when serialized again as a JSON string
+for string-input providers. It removes oldest tail entries to fit; this can
+increase `coverage.omittedEntries`. Coverage counters continue to describe the
+**tail only**, so always inspect the pinned request's separate loss flags.
+Original scope and host persistence remain unverified/unknown; nothing is
+automatically labeled safe. Redaction remains best-effort.
+
+`review` displays the pin and its metadata in a literal fenced block for v3.
+The judges already send the entire state, but no hosted v3 behavior or accuracy
+has been measured. V1/v2 extraction and review output, question recipes and
+production defaults remain unchanged. V3 changes fingerprints: use fresh output
+paths and matching reviews/predictions, never reinterpret frozen v2 judgments.
+
+A read-only, in-memory structural check on the six fresh-family checkpoint IDs
+recovered the tail-dropped request in case 2. Case 6 remains explicitly
+unavailable because its post-compaction source contains no user message. The
+stricter payload bound increases older-tail omissions in four of the six
+snapshots. No new snapshots or judgments were saved during this check; retaining
+one request does not demonstrate better model decisions or complete scope.
+
 ## 2. Review and label
 
 ```sh
@@ -343,6 +387,38 @@ The real checkpoints retained explicit nonpositive choices at every candidate
 floor. This separates confidence-floor sensitivity from missing-evidence gates,
 but does not validate choice-only or select a deployment policy.
 
+A third approved batch froze those two policies before inference and selected
+six real checkpoints from six families excluded from earlier hosted pilots.
+All 12 v2 judge requests succeeded, with no retries; both providers withheld
+all six under both policies and chose `unclear` for scope and preservation
+every time. Fresh blind Opus/Fable reviewers agreed on all six: three
+provisional safe, two unsafe and one uncertain. The safe-review disagreements
+therefore cannot be resolved just by lowering the probability floor. A completed
+current request is not necessarily the same as a globally finished project,
+and extractor provenance marked `not-verified` is not proof that visible current
+scope is unknown. These are hypotheses to investigate, not confirmed model
+errors or human-label accuracy. No questions, defaults or host behavior changed;
+the batch's 12-request/two-reviewer approval is consumed. Once used to tune the
+next recipe, these families must no longer be treated as held-out validation.
+
+Local investigation reproduced all 12 saved decisions, assessments, scores and
+blocker lists exactly; choice-only replay also matches the selected answers.
+Two of the three provisionally safe disagreements contain no retained user
+message. One has 224 omitted entries; the other begins with a clipped compaction
+summary. Authoritative scope could be restated elsewhere, but reviewer acceptance
+of reported completion does not establish that missing requirements are immaterial.
+The third case retains its user question with no clipping or omitted entries,
+making it the strongest candidate for a current-request/preservation wording probe.
+The recipe already permits no essential continuation context, so simply adding
+that exception again is not a demonstrated fix. All six states share unverified
+original-scope and unknown-persistence metadata, and saved answers have no model
+rationales: neither metadata causality nor reviewer correctness is established.
+The opt-in state-v3 extraction experiment now retains the latest available user
+request separately from the rolling tail, with clipping and source-boundary
+provenance rather than a claim of complete scope. A separate wording probe should
+distinguish original-history verification from visible current-request evidence.
+Those are separate variables to test, not grounds to relax the existing gates.
+
 ### Optional local comparisons
 
 ```sh
@@ -460,6 +536,9 @@ credentials, input/response bounds, redirect rejection and transport failures.
 V2 fixtures cover retained-entry clipping/redaction, unknown source completeness,
 compaction-summary provenance, unchanged v1 state, four-axis question translation,
 fixed-floor gates, uncertain/unsafe distinction and malformed/refused axes.
+State-v3 CLI fixtures cover tail-dropped request retention, source-boundary and
+future-message exclusion, empty latest requests, separate pin loss flags,
+serialized/escaped payload bounds, literal review rendering and v1/v2 compatibility.
 Offline replay fixtures cover explicit floors, choice-only gates, source failure
 preservation, distribution revalidation, stale/duplicate inputs, separate provider
 identities, blocker categories, private outputs and no new inference attribution.

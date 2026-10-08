@@ -104,7 +104,180 @@ test('v2 identifies a reconstructed compaction boundary and does not rewrite v1 
   assert.equal(v2.coverage.sourceHistory.originalTaskScope, 'not-verified');
   assert.equal(v2.coverage.omittedEntries, 0);
   assert.equal(v2.coverage.textClippedEntries, 1);
-  assert.match(run('extract', '--db', path, '--out', join(dir, 'bad-version.jsonl'), '--state-version', '3').stderr, /state-version must be/);
+  assert.match(run('extract', '--db', path, '--out', join(dir, 'bad-version.jsonl'), '--state-version', '4').stderr, /state-version must be/);
+});
+
+test('v3 retains the latest user request outside a bounded rolling tail without changing v1/v2', () => {
+  const { dir, path } = fixture();
+  const db = new DatabaseSync(path);
+  db.prepare("UPDATE session_message SET seq = 40 WHERE id = 'root-2'").run();
+  db.prepare("UPDATE session_message SET seq = 41 WHERE id = 'root-3'").run();
+  db.prepare("UPDATE session_message SET seq = 42 WHERE id = 'root-4'").run();
+  const insert = db.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, ?)');
+  insert.run('new-request', 'root', 'user', 2, JSON.stringify({ text: 'Latest request: keep the result offline. API_KEY=fictional-request-secret' }));
+  for (let seq = 3; seq < 40; seq++) insert.run(`work-${seq}`, 'root', 'assistant', seq,
+    JSON.stringify({ content: [{ type: 'text', text: 'Work detail. '.repeat(500) }] }));
+  db.close();
+  const before = readFileSync(path), snapshots = {};
+  for (const version of ['1', '2', '3']) {
+    const out = join(dir, `state-${version}.jsonl`);
+    const r = run('extract', '--db', path, '--out', out, '--state-version', version);
+    assert.equal(r.status, 0, r.stderr);
+    snapshots[version] = JSON.parse(readFileSync(out, 'utf8'));
+    assert.equal(statSync(out).mode & 0o777, 0o600);
+  }
+  const state = snapshots['3'].state;
+  assert.equal(state.version, 3);
+  assert.equal(state.latestRequest.status, 'available');
+  assert.equal(state.latestRequest.text, 'Latest request: keep the result offline. API_KEY=[REDACTED]');
+  assert.deepEqual(state.latestRequest.loss, { textClipped: false, redacted: true });
+  assert.deepEqual(state.latestRequest.provenance, { source: 'user-message', sourceEntryIndex: 1,
+    startsAt: 'session-start', retainedInRecent: false, authority: 'not-verified' });
+  assert.equal(state.recent.findLast(e => e.role === 'assistant').text, 'Work verified and saved.');
+  assert.ok(state.coverage.omittedEntries > 0);
+  assert.equal(state.coverage.sourceHistory.originalTaskScope, 'not-verified');
+  assert.equal(state.compaction.persistence, 'unknown');
+  assert.ok(Buffer.byteLength(JSON.stringify(state)) <= 22000);
+  for (const version of ['1', '2']) {
+    assert.ok(!Object.hasOwn(snapshots[version].state, 'latestRequest'));
+    assert.equal(snapshots[version].state.recent.length, 4);
+    assert.equal(snapshots[version].state.coverage.omittedEntries, 36);
+    assert.equal(snapshots[version].state.recent.at(-1).text, 'Work verified and saved.');
+    const again = join(dir, `again-${version}.jsonl`);
+    assert.equal(run('extract', '--db', path, '--out', again, '--state-version', version).status, 0);
+    assert.deepEqual(JSON.parse(readFileSync(again, 'utf8')), snapshots[version]);
+    assert.equal(snapshots[version].id, snapshots['3'].id);
+  }
+  assert.ok(!Object.hasOwn(snapshots['1'].state, 'version'));
+  assert.deepEqual(snapshots['1'].state.coverage, { omittedEntries: 36, toolContentsExcluded: true, historicalContextReconstructed: true });
+  assert.equal(snapshots['2'].state.version, 2);
+  assert.equal(snapshots['2'].state.coverage.textClippedEntries, 3);
+  assert.equal(snapshots['2'].state.coverage.redactedEntries, 0);
+  const serialized = JSON.stringify(state);
+  for (const secret of ['fictional-request-secret', 'do-not-export-me', 'FUTURE TASK', 'PRIVATE COMMAND', 'PRIVATE OUTPUT', 'HIDDEN REASONING']) assert.ok(!serialized.includes(secret));
+  assert.deepEqual(readFileSync(path), before);
+});
+
+test('v3 does not resurrect pre-compaction requests or use future follow-ups as current authority', () => {
+  const { dir, path } = fixture();
+  const db = new DatabaseSync(path);
+  db.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, ?)').run('old-request', 'root', 'user', 0,
+    JSON.stringify({ text: 'PRECOMPACTION REQUEST: obsolete authority.' }));
+  db.prepare("UPDATE session_message SET type = 'compaction', data = ? WHERE id = 'root-1'").run(
+    JSON.stringify({ status: 'completed', summary: 'Reported prior scope. ' + 'x'.repeat(3100) }));
+  db.close();
+  const out = join(dir, 'missing-v3.jsonl');
+  assert.equal(run('extract', '--db', path, '--out', out, '--state-version', '3').status, 0);
+  const state = JSON.parse(readFileSync(out, 'utf8')).state;
+  assert.deepEqual(state.latestRequest, { status: 'unavailable', reason: 'no-user-message-within-source-boundary',
+    provenance: { startsAt: 'compaction-summary', authority: 'not-verified' } });
+  assert.equal(state.recent[0].role, 'summary');
+  assert.equal(state.recent[0].loss.textClipped, true);
+  assert.equal(state.coverage.sourceHistory.startsAt, 'compaction-summary');
+  for (const excluded of ['PRECOMPACTION REQUEST', 'FUTURE TASK']) assert.ok(!JSON.stringify(state).includes(excluded));
+  const update = new DatabaseSync(path);
+  update.prepare("UPDATE session_message SET seq = 4 WHERE id = 'root-2'").run();
+  update.prepare("UPDATE session_message SET seq = 5 WHERE id = 'root-3'").run();
+  update.prepare("UPDATE session_message SET seq = 6 WHERE id = 'root-4'").run();
+  update.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, ?)').run('new-authority', 'root', 'user', 3,
+    JSON.stringify({ text: 'Now pause implementation and report the blocker.' }));
+  update.close();
+  const next = join(dir, 'available-v3.jsonl');
+  assert.equal(run('extract', '--db', path, '--out', next, '--state-version', '3').status, 0);
+  const latest = JSON.parse(readFileSync(next, 'utf8')).state.latestRequest;
+  assert.equal(latest.status, 'available');
+  assert.equal(latest.text, 'Now pause implementation and report the blocker.');
+  assert.deepEqual(latest.provenance, { source: 'user-message', sourceEntryIndex: 1,
+    startsAt: 'compaction-summary', retainedInRecent: true, authority: 'not-verified' });
+  const empty = new DatabaseSync(path);
+  empty.prepare("UPDATE session_message SET seq = 2 WHERE id = 'new-authority'").run();
+  empty.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, ?)').run('empty-request', 'root', 'user', 3,
+    JSON.stringify({ text: '' }));
+  empty.close();
+  const emptyOut = join(dir, 'empty-v3.jsonl');
+  assert.equal(run('extract', '--db', path, '--out', emptyOut, '--state-version', '3').status, 0);
+  const emptyPin = JSON.parse(readFileSync(emptyOut, 'utf8')).state.latestRequest;
+  assert.equal(emptyPin.status, 'available');
+  assert.equal(emptyPin.text, '', 'an empty latest request must not fall back to an older instruction');
+  assert.equal(emptyPin.provenance.sourceEntryIndex, 2);
+});
+
+test('v3 reports pinned-request clipping/redaction and bounds serialized bytes including the pin', () => {
+  const { dir, path } = fixture();
+  const db = new DatabaseSync(path);
+  db.prepare("UPDATE session_message SET data = ? WHERE id = 'root-1'").run(JSON.stringify({
+    text: 'API_KEY=fictional-pin-secret ' + '\u0001'.repeat(3100) + ' HIDDEN REQUIREMENT AFTER CLIP',
+  }));
+  db.prepare("UPDATE session_message SET seq = 10 WHERE id = 'root-2'").run();
+  db.prepare("UPDATE session_message SET seq = 11 WHERE id = 'root-3'").run();
+  db.prepare("UPDATE session_message SET seq = 12 WHERE id = 'root-4'").run();
+  const insert = db.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, ?)');
+  for (let seq = 2; seq < 10; seq++) insert.run(`unicode-${seq}`, 'root', 'assistant', seq,
+    JSON.stringify({ content: [{ type: 'text', text: '😀'.repeat(2000) }] }));
+  db.close();
+  const out = join(dir, 'escaped-v3.jsonl');
+  const r = run('extract', '--db', path, '--out', out, '--state-version', '3');
+  assert.equal(r.status, 0, r.stderr);
+  const state = JSON.parse(readFileSync(out, 'utf8')).state;
+  assert.equal(state.latestRequest.text.length, 3000);
+  assert.ok(state.latestRequest.text.startsWith('API_KEY=[REDACTED] '));
+  assert.deepEqual(state.latestRequest.loss, { textClipped: true, redacted: true });
+  assert.equal(state.latestRequest.provenance.retainedInRecent, false);
+  assert.ok(Buffer.byteLength(JSON.stringify(state)) <= 22000, 'bound must include JSON escaping, Unicode, metadata and duplicate pinned content');
+  assert.equal(state.recent.at(-1).text, 'Work verified and saved.');
+  assert.equal(state.coverage.omittedEntries, 10 - state.recent.length);
+  assert.equal(state.coverage.textClippedEntries, 0, 'tail counters must not imply the separately pinned request is unclipped');
+  assert.equal(state.coverage.redactedEntries, 0);
+  for (const excluded of ['fictional-pin-secret', 'HIDDEN REQUIREMENT', 'FUTURE TASK']) assert.ok(!JSON.stringify(state).includes(excluded));
+});
+
+test('v3 bounds both object and string-encoded state payloads when text contains many escapes', () => {
+  const { dir, path } = fixture();
+  const db = new DatabaseSync(path);
+  db.prepare("UPDATE session_message SET data = ? WHERE id = 'root-1'").run(JSON.stringify({ text: 'x'.repeat(3000) }));
+  db.prepare("UPDATE session_message SET seq = 4 WHERE id = 'root-2'").run();
+  db.prepare("UPDATE session_message SET seq = 5 WHERE id = 'root-3'").run();
+  db.prepare("UPDATE session_message SET seq = 6 WHERE id = 'root-4'").run();
+  const insert = db.prepare('INSERT INTO session_message VALUES (?, ?, ?, ?, ?)');
+  for (const [seq, size] of [[2, 3000], [3, 6000]]) insert.run(`escaped-${seq}`, 'root', 'assistant', seq,
+    JSON.stringify({ content: [{ type: 'text', text: '\\'.repeat(size) }] }));
+  db.close();
+  const out = join(dir, 'string-encoded-v3.jsonl');
+  assert.equal(run('extract', '--db', path, '--out', out, '--state-version', '3').status, 0);
+  const state = JSON.parse(readFileSync(out, 'utf8')).state;
+  assert.equal(state.latestRequest.text, 'x'.repeat(3000));
+  assert.equal(state.latestRequest.provenance.retainedInRecent, false);
+  assert.equal(state.latestRequest.loss.textClipped, false);
+  assert.equal(state.recent.at(-1).text, 'Work verified and saved.');
+  assert.ok(Buffer.byteLength(JSON.stringify(state)) <= 22000);
+  assert.ok(Buffer.byteLength(JSON.stringify(JSON.stringify(state))) <= 22000, 'string-input providers escape the serialized state again');
+});
+
+test('review displays v3 pinned-request evidence and provenance literally without changing v1/v2 reports', () => {
+  const { dir, path } = fixture();
+  const db = new DatabaseSync(path);
+  db.prepare("UPDATE session_message SET data = ? WHERE id = 'root-1'").run(JSON.stringify({
+    text: 'Preserve ```` literally. ![untrusted](https://example.invalid/private.png) API_KEY=fictional-review-secret',
+  }));
+  db.close();
+  for (const version of ['1', '2', '3']) {
+    const corpus = join(dir, `review-corpus-${version}.jsonl`), out = join(dir, `review-${version}.md`);
+    assert.equal(run('extract', '--db', path, '--out', corpus, '--state-version', version).status, 0);
+    const result = run('review', '--corpus', corpus, '--out', out, '--count', '1');
+    assert.equal(result.status, 0, result.stderr);
+    const report = readFileSync(out, 'utf8');
+    assert.equal(statSync(out).mode & 0o777, 0o600);
+    assert.ok(!report.includes('fictional-review-secret'));
+    if (version === '3') {
+      assert.match(report, /### Latest available user request \(pinned evidence, not verified scope\)/);
+      const record = JSON.parse(readFileSync(corpus, 'utf8'));
+      assert.ok(report.includes('`````text\n' + JSON.stringify(record.state.latestRequest, null, 2) + '\n`````'));
+      assert.match(report, /"retainedInRecent": true/);
+      assert.match(report, /"authority": "not-verified"/);
+      assert.match(report, /"redacted": true/);
+    } else assert.ok(!report.includes('pinned evidence'));
+  }
+  assert.equal(readFileSync(join(dir, 'review-1.md'), 'utf8'), readFileSync(join(dir, 'review-2.md'), 'utf8'));
 });
 
 function runAsync(...args) {
