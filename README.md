@@ -99,10 +99,16 @@ the unchanged 0.9 floor. Decisions is still an eval-only option. `timeoutMs`
 must be an integer from 1 to 10,000. `endpoint` is optional and restricted by the
 existing Jev adapter to the official HTTPS URL or a loopback fixture.
 
-Then explicitly request one `defrag_check`. Its `defrag.remote` permission hook
-requires a fresh host permission prompt even if a configured/saved rule would
-allow it; explicit denies remain denies. Reject the prompt to send nothing.
-Do not use another permission-altering plugin to auto-approve this action.
+Then explicitly request one `defrag_check`. Defrag does not override the host's
+permission decisions or impose a separate consent dialog. **Allow All means no
+additional permission prompts.** Enabling `remoteEnabled` makes the hosted tool
+available to the agent; an allowed invocation can send session text and incur
+cost without another confirmation. Leave it disabled unless you intend that
+outbound-data access. The `defrag.remote` tool permission action controls host
+availability; it is not proof of a per-call permission request. Ask-mode prompting
+has not been verified end to end. Use preview-only mode when outbound access
+must be disabled, rather than relying on a dialog appearing.
+
 Enabling the tool alone does not make judge requests. Each admitted invocation
 attempts at most one judgment, without retries or fallback. Snapshot text leaves
 your machine and costs may apply; redaction is best-effort and private work or
@@ -133,8 +139,10 @@ Defrag never requests compaction, edits prompts, changes host compaction setting
 or launches background checks. **OpenCode's own automatic compaction is unaffected.**
 Package loading has been checked in isolated OpenCode 2.0.20 servers, with remote
 registration disabled and enabled, and the tool/permission contracts have local
-fixtures. No real hosted checks through this plugin or actual OpenChamber tool
-visibility/permission UI have been tested. Try local preview first; native
+fixtures. One explicitly chat-approved hosted check has succeeded through
+OpenChamber under Allow All, without a permission prompt; it withheld compaction.
+Live direct preview also worked. Ask-mode permission UI has not been tested.
+Try local preview first; native
 compaction continuation and human-reviewed accuracy are still unmeasured.
 
 ## 1. Extract checkpoints
@@ -646,8 +654,8 @@ identities, blocker categories, private outputs and no new inference attribution
 They do not establish real model accuracy or live IDE
 compatibility.
 
-Plugin fixtures cover local preview, current-session ownership, per-call
-permission prompting, credential scrubbing, frozen v2 scoring, stale full-context
+Plugin fixtures cover local preview, current-session ownership, unchanged host
+permission decisions, credential scrubbing, frozen v2 scoring, stale full-context
 revalidation, transport failures, cancellation/unload, concurrent-check blocking
 and package contents. Actual host loading is a separate optional check:
 
@@ -665,8 +673,8 @@ outputs, future-data exclusion, invalid probabilities, input-limit abstentions,
 truncation rejection, worker exits and timeouts. They do not download or load
 real weights during `npm run check`.
 
-Next: verify manual preview and consent prompts in the actual OpenChamber/OpenCode
-client, then human-reviewed natural checkpoints and explicitly approved v3
+Next: verify Ask/Deny-mode behavior in the actual OpenChamber/OpenCode client
+without changing Allow All behavior, then human-reviewed checkpoints and approved v3
 behavior/controlled-continuation experiments. Automatic lifecycle coordination
 and independently verified adapters remain future work for OpenCode/OpenChamber, Claude Code,
 Codex, Cursor and oh-my-pi. Auto-compaction must be opt-in and capability-gated;

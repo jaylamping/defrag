@@ -24,7 +24,9 @@ for (const remoteEnabled of [false, true]) {
         }
       } };`, { mode: 0o600 });
       writeFileSync(join(dir, 'opencode.json'), JSON.stringify({ $schema: 'https://opencode.ai/config.json',
-        plugins: [{ package: root, options: { remoteEnabled, keyFile } }, probe], warming: false, compaction: { auto: false } }), { mode: 0o600 });
+        plugins: [{ package: root, options: { remoteEnabled, keyFile } }, probe],
+        permissions: [{ action: '*', resource: '*', effect: 'allow' }],
+        warming: false, compaction: { auto: false } }), { mode: 0o600 });
       // No inherited provider credentials or real configuration/service paths.
       const env = { PATH: process.env.PATH, HOME: dir, XDG_CONFIG_HOME: join(dir, 'config'),
         XDG_DATA_HOME: join(dir, 'data'), XDG_CACHE_HOME: join(dir, 'cache'), XDG_STATE_HOME: join(dir, 'state'), TMPDIR: dir };
@@ -40,8 +42,9 @@ for (const remoteEnabled of [false, true]) {
           child.once('error', () => { clearTimeout(timer); reject(new Error('Cannot start isolated OpenCode')); });
           child.once('exit', () => { clearTimeout(timer); reject(new Error('Isolated OpenCode exited before startup')); });
         });
-        const request = path => {
-          const result = spawnSync(process.env.DEFRAG_OPENCODE_BIN, ['api', 'get', path], { cwd: dir, env, encoding: 'utf8', timeout: 5000 });
+        const request = (path, body) => {
+          const result = spawnSync(process.env.DEFRAG_OPENCODE_BIN, ['api', body ? 'post' : 'get', path,
+            ...(body ? ['--data', JSON.stringify(body)] : [])], { cwd: dir, env, encoding: 'utf8', timeout: 5000 });
           assert.equal(result.status, 0, 'isolated authenticated API command must succeed');
           return JSON.parse(result.stdout);
         };
@@ -62,6 +65,10 @@ for (const remoteEnabled of [false, true]) {
         assert.equal(plugin.features.server, true);
         assert.equal(routing?.id, 'defrag-routing-probe');
         assert.equal(routing.state.status, 'active', 'actual host registrations must keep the observers outside Code Mode');
+        const { data: session } = request('/api/session', { title: 'Local permission fixture', location: { directory: dir } });
+        assert.match(session.id, /^ses/);
+        const permission = request(`/api/session/${session.id}/permission`, { action: 'defrag.remote', resources: ['*'] });
+        assert.equal(permission.data.effect, 'allow', 'Allow All must not become a prompt in the actual host permission service');
       } finally {
         if (child.pid && child.exitCode === null) child.kill('SIGTERM');
         const force = setTimeout(() => child.kill('SIGKILL'), 2000);

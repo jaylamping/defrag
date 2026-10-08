@@ -44,11 +44,6 @@ export default {
         : kinds.includes(error?.kind) ? error.kind : 'context';
     };
     const keyFile = options.keyFile, endpoint = options.endpoint;
-    if (remoteEnabled) await ctx.permission.hook('evaluate', event => {
-      if (event.action !== 'defrag.remote' || event.effect === 'deny') return;
-      event.effect = 'ask';
-      event.message = 'Allow one Jev request with bounded, best-effort-redacted text from this session? Private work may remain and costs may apply. No retries or compaction.';
-    });
     await ctx.tool.transform(editor => {
       editor.add({ name: 'defrag_preview',
         description: 'Manually preview a bounded, redacted compaction-check snapshot of this session. Local only; no credentials, hosted inference or compaction. Returns metadata, not transcript text. This experimental snapshot is not proof that compaction is safe.',
@@ -70,7 +65,7 @@ export default {
         },
       });
       if (remoteEnabled) editor.add({ name: 'defrag_check',
-        description: 'Manually ask Jev to assess this session using experimental state-v3/checkpoint-v2. Requires a fresh user permission for each request. Advisory only: never compacts, retries, changes prompts or installs automatic monitoring. Not validated safety or accuracy.',
+        description: 'Manually ask Jev to assess this session using experimental state-v3/checkpoint-v2. Available only with installation-time hosted opt-in. Sends bounded, best-effort-redacted session text to Jev; costs may apply. Does not force permission prompts in Allow All mode. Advisory only: never compacts, retries, changes prompts or installs automatic monitoring. Not validated safety or accuracy.',
         input: { type: 'object', properties: {}, additionalProperties: false },
         options: { permission: 'defrag.remote', codemode: false },
         execute: async (_, caller) => {

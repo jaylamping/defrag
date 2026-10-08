@@ -103,25 +103,20 @@ async function hostedFixture(callback) {
   } finally { await new Promise(resolve => server.close(resolve)); }
 }
 
-test('hosted plugin checks require a per-call host permission and use bounded, current-session v3 evidence', async () => {
+test('hosted plugin checks do not override host permission decisions and use bounded, current-session v3 evidence', async () => {
   await hostedFixture(async ({ options, requests, key }) => {
     const { tools, hooks, messages, invocation } = await load(options);
     const check = tools.get('defrag_check');
     assert.ok(check);
     assert.equal(check.options.permission, 'defrag.remote');
     const hook = hooks.get('evaluate');
-    assert.ok(hook, 'a tool input flag alone is not user consent');
-    for (const effect of ['allow', 'ask']) {
+    for (const effect of ['allow', 'ask', 'deny']) {
       const event = { action: 'defrag.remote', effect };
-      await hook(event);
-      assert.equal(event.effect, 'ask', 'saved Always permissions must not remove per-call confirmation');
-      assert.match(event.message, /one Jev request/i);
+      await hook?.(event);
+      assert.equal(event.effect, effect, 'Allow All must not be escalated to a prompt; preserve the host policy');
     }
-    const denied = { action: 'defrag.remote', effect: 'deny' };
-    await hook(denied);
-    assert.equal(denied.effect, 'deny');
     const other = { action: 'read', effect: 'allow' };
-    await hook(other);
+    await hook?.(other);
     assert.equal(other.effect, 'allow');
     messages.at(-1).content[0].name = 'defrag_check';
     messages.at(-2).text += ' ' + key;
