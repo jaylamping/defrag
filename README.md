@@ -739,3 +739,35 @@ hosts without a supported external compact operation must remain hint-only.
 Live adapters need per-operation error categories, session ownership checks,
 queue/active-work checks, deduplication, cooldowns, cancellation and a final
 checkpoint revalidation before requesting the host's native compaction.
+
+## Roadmap
+
+### Context-aware compaction strategy selection (future, experimental)
+
+Extend defrag's advisory classification from **when to compact** to **which
+compaction strategy fits the checkpoint**. This is not required for the initial
+release and does not change the current safety questions, thresholds or defaults.
+
+- Keep the safety gate separate from strategy selection: the best available
+  strategy is not permission to execute it, and selection confidence is not
+  compaction-safety confidence.
+- Use measured context pressure, usable input limits and output reserves;
+  context composition, task state and exact-preservation needs; and verified
+  host/provider capabilities. Missing measurements remain unknown.
+- Apply deterministic budget and capability filtering, with classification for
+  task state and preservation needs. Candidates include wait/no compaction,
+  selective pruning, summary plus recent history, structured checkpoints with
+  preserved evidence, and provider-native compaction. Abstain when evidence is
+  incomplete or conflicting; never recommend an unsupported operation.
+- Report supporting evidence, alternatives, information that must survive,
+  missing evidence and estimated savings only where measurable.
+- Start with offline strategy-selection and custom-checkpoint-builder experiments.
+  Explore a hybrid checkpoint that preserves consequential requirements and
+  source provenance, summarizes progress, retains recent exchanges, references
+  durable evidence and reports omissions without promoting historical text into
+  current authorization.
+- Validate strategies through controlled continuation outcomes and preservation
+  checks, not just plausible classifications or smaller payloads. Hosted inference,
+  reviewer agents and actual compaction experiments require fresh bounded approval.
+  Deployment and execution integration are later, separately validated work;
+  existing manual, advisory-only behavior remains unchanged.
