@@ -1,5 +1,9 @@
 node_modules/
 dist/
+.venv/
+.venv-openjev/
+__pycache__/
+*.pyc
 .env
 *.key
 # Eval corpora are built from real sessions and never leave this machine.

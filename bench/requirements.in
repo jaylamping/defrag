@@ -1,0 +1,7 @@
+# Optional benchmark runtime only; the Node CLI remains dependency-free.
+torch==2.14.1
+transformers==5.19.0
+mlx==0.32.3
+mlx-lm==0.32.0
+safetensors==0.8.0
+psutil==7.2.2
