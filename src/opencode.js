@@ -5,7 +5,7 @@ import { configureJev, judgeJev } from './jev.js';
 
 const fingerprint = state => createHash('sha256').update(JSON.stringify(state)).digest('hex');
 
-async function capture(ctx, invocation, secrets = []) {
+async function capture(ctx, invocation, secrets = [], stateVersion = 3) {
   invocation.signal?.throwIfAborted();
   const sessionID = invocation.sessionID;
   if (typeof sessionID !== 'string' || !sessionID.startsWith('ses')) throw new Error('session');
@@ -18,7 +18,7 @@ async function capture(ctx, invocation, secrets = []) {
     ? { ...m, content: (m.content ?? []).filter(p => !(p.type === 'tool' && p.id === invocation.id && ['defrag_preview', 'defrag_check'].includes(p.name))) }
     : m);
   invocation.signal?.throwIfAborted();
-  return { state: snapshot(visible, '3', boundary >= 0 ? 'compaction-summary' : 'session-context-boundary', 'live', secrets),
+  return { state: snapshot(visible, String(stateVersion), boundary >= 0 ? 'compaction-summary' : 'session-context-boundary', 'live', secrets),
     revision: fingerprint({ messages: visible, agent: session.agent, model: session.model, revert: session.revert }),
     activeTools: visible.flatMap(m => m.type === 'assistant' ? m.content ?? [] : [])
       .filter(p => p.type === 'tool' && ['running', 'streaming'].includes(p.state?.status)).length };
@@ -30,6 +30,8 @@ export default {
   id: 'defrag',
   async setup(ctx) {
     const options = ctx.options ?? {};
+    const stateVersion = options.stateVersion ?? 3;
+    if (![3, 4].includes(stateVersion)) throw new Error('stateVersion must be 3 or 4');
     if (options.remoteEnabled !== undefined && typeof options.remoteEnabled !== 'boolean') throw new Error('remoteEnabled must be boolean');
     const remoteEnabled = options.remoteEnabled === true;
     if (remoteEnabled && (typeof options.keyFile !== 'string' || !isAbsolute(options.keyFile))) throw new Error('Hosted checks require an absolute private keyFile path');
@@ -54,10 +56,13 @@ export default {
         execute: async (_, caller) => {
           const invocation = bounded(caller);
           try {
-            const { state, activeTools } = await capture(ctx, invocation);
+            const { state, activeTools } = await capture(ctx, invocation, [], stateVersion);
             const { text, ...latestRequest } = state.latestRequest;
+            const retained = state.retainedContext;
+            const retainedMetadata = retained ? Object.fromEntries(Object.entries(retained).filter(([key]) => !['entries', 'latestUser'].includes(key))) : null;
             return { content: JSON.stringify({ mode: 'local-preview', advisoryOnly: true, hostedCalls: 0, compactionRequested: false,
-              stateVersion: 3, fingerprint: fingerprint(state), encodedStateBytes: Buffer.byteLength(JSON.stringify(JSON.stringify(state))),
+              stateVersion, fingerprint: fingerprint(state), encodedStateBytes: Buffer.byteLength(JSON.stringify(JSON.stringify(state))),
+              ...(retainedMetadata ? { retainedContext: retainedMetadata } : {}),
               latestRequest, coverage: state.coverage, observerToolExcluded: true, activeTools,
               warning: 'Live context approximation, not an idle checkpoint or verified scope/persistence. No safety judgment has been made.' }) };
           } catch (error) { return { content: JSON.stringify({ mode: 'local-preview', advisoryOnly: true, hostedCalls: 0,
@@ -65,7 +70,7 @@ export default {
         },
       });
       if (remoteEnabled) editor.add({ name: 'defrag_check',
-        description: 'Manually ask Jev to assess this session using experimental state-v3/checkpoint-v2. Available only with installation-time hosted opt-in. Sends bounded, best-effort-redacted session text to Jev; costs may apply. Does not force permission prompts in Allow All mode. Advisory only: never compacts, retries, changes prompts or installs automatic monitoring. Not validated safety or accuracy.',
+        description: 'Manually ask Jev to assess this session using experimental checkpoint-v2 and configured state v3 (default) or v4. Available only with installation-time hosted opt-in. Sends bounded, best-effort-redacted session text to Jev; costs may apply. Does not force permission prompts in Allow All mode. Advisory only: never compacts, retries, changes prompts or installs automatic monitoring. Not validated safety or accuracy.',
         input: { type: 'object', properties: {}, additionalProperties: false },
         options: { permission: 'defrag.remote', codemode: false },
         execute: async (_, caller) => {
@@ -77,16 +82,16 @@ export default {
           try {
             invocation.signal.throwIfAborted();
             const configuration = configureJev({ 'allow-remote': 'yes', 'key-file': keyFile, endpoint });
-            const { state, revision, activeTools } = await capture(ctx, invocation, [configuration.key]);
+            const { state, revision, activeTools } = await capture(ctx, invocation, [configuration.key], stateVersion);
             if (activeTools) return { content: JSON.stringify({ mode: 'hosted-check', advisoryOnly: true,
               compactionRequested: false, hostedCalls: 0, decision: null, error: 'busy' }) };
             hostedCalls = 1;
             const result = await judgeJev({ state }, configuration, timeout, 'checkpoint-v2', invocation.signal);
-            const current = await capture(ctx, invocation, [configuration.key]);
+            const current = await capture(ctx, invocation, [configuration.key], stateVersion);
             if (current.revision !== revision) return { content: JSON.stringify({ mode: 'hosted-check', advisoryOnly: true,
               compactionRequested: false, hostedCalls, decision: null, error: 'stale-context', stateUnchanged: false }) };
             return { content: JSON.stringify({ mode: 'hosted-check', advisoryOnly: true, compactionRequested: false,
-              hostedCalls, recipe: 'checkpoint-v2', stateVersion: 3, fingerprint: fingerprint(state), stateUnchanged: true,
+              hostedCalls, recipe: 'checkpoint-v2', stateVersion, fingerprint: fingerprint(state), stateUnchanged: true,
               ...result, warning: 'Live context approximation, not an idle checkpoint or authorization to compact. Accuracy and host persistence are unverified.' }) };
           } catch (error) {
             return { content: JSON.stringify({ mode: 'hosted-check', advisoryOnly: true, compactionRequested: false,

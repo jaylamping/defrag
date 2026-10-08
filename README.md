@@ -94,7 +94,7 @@ To register `defrag_check`, replace just that plugin entry with:
 
 `keyFile` must be an absolute path to a private regular file (mode `0600`) holding
 your TypeSafe key. Never put the key itself in config, a prompt, a tool argument
-or this repository. The adapter uses Jev with **state v3 / checkpoint-v2** and
+or this repository. The adapter defaults to Jev with **state v3 / checkpoint-v2** and
 the unchanged 0.9 floor. Decisions is still an eval-only option. `timeoutMs`
 must be an integer from 1 to 10,000. `endpoint` is optional and restricted by the
 existing Jev adapter to the official HTTPS URL or a loopback fixture.
@@ -108,6 +108,13 @@ outbound-data access. The `defrag.remote` tool permission action controls host
 availability; it is not proof of a per-call permission request. Ask-mode prompting
 has not been verified end to end. Use preview-only mode when outbound access
 must be disabled, rather than relying on a dialog appearing.
+
+An optional numeric `"stateVersion": 4` plugin option exposes retained-transcript
+availability/loss metadata. The live V2 plugin API lacks structured pre-compaction
+history: it **does not recover or send opaque `compaction.recent` bodies**, parse
+their role labels, scan the database, or add background collection. Offline v4
+extraction can recover text with an exact structured-history match (below).
+The plugin still defaults to v3, and preview still returns metadata only.
 
 Enabling the tool alone does not make judge requests. Each admitted invocation
 attempts at most one judgment, without retries or fallback. Snapshot text leaves
@@ -240,8 +247,8 @@ Original scope and host persistence remain unverified/unknown; nothing is
 automatically labeled safe. Redaction remains best-effort.
 
 `review` displays the pin and its metadata in a literal fenced block for v3.
-The judges already send the entire state, but no hosted v3 behavior or accuracy
-has been measured. V1/v2 extraction and review output, question recipes and
+The judges already send the entire state. Bounded hosted v3 smoke checks have
+run, but accuracy has not been measured. V1/v2 extraction and review output, question recipes and
 production defaults remain unchanged. V3 changes fingerprints: use fresh output
 paths and matching reviews/predictions, never reinterpret frozen v2 judgments.
 
@@ -251,6 +258,56 @@ unavailable because its post-compaction source contains no user message. The
 stricter payload bound increases older-tail omissions in four of the six
 snapshots. No new snapshots or judgments were saved during this check; retaining
 one request does not demonstrate better model decisions or complete scope.
+
+### Opt-in state v4: host-retained continuation evidence
+
+```sh
+node src/cli.js extract --db ~/.local/share/opencode/opencode.db \
+  --out eval/data/checkpoints-v4.jsonl --state-version 4
+```
+
+OpenCode stores a summary **and** a serialized retained transcript in a completed
+compaction message. V1–v3 use only the summary; v4 adds `retainedContext` so the
+other field is not silently ignored. Missing, empty, malformed, unsupported,
+over-limit, unmatched and recovered sources have explicit statuses/reasons.
+Unknown loss counts remain `null`, not zero. `sourceBytes` measures the original
+field; it is not an amount of verified recoverable context.
+
+Offline recovery requires an **exact, whole-transcript match** to a contiguous
+suffix of typed messages preceding that compaction. Matching is limited to
+128 source messages and a 128,000-byte retained field. The supported native V2
+serialization is reproduced locally, including private parts, solely to prove
+the match. A partial match, changed format, omission prefix or ambiguous source
+fails closed. Transcript labels are never used to infer authorship: a tool
+output containing `[User]: ...` cannot create a recovered user message.
+
+Only redacted user/assistant text and bounded tool names/statuses are emitted
+from matched typed records. Tool inputs, outputs, errors and reasoning remain
+excluded; standalone skills, synthetic/shell records and attachment/skill text
+are not promoted to user text. Loss metadata records exclusions and budget
+omissions separately. The raw transcript, source IDs and raw-content hashes are
+never sent. Changes to recovered requirements change the judge-state fingerprint;
+changes to excluded raw contents need not. Live stale-state validation continues
+to include the entire local context, including excluded contents.
+
+`retainedContext.latestUser` separately pins the latest **historical** user in
+the matched source. It does not replace `latestRequest`, certify current authority,
+or resurrect dropped requests. A newer post-compaction user remains the current
+pin. Entire state v4, including both pins and evidence arrays, fits 22,000 bytes
+as either object JSON or string-encoded JSON. It drops oldest recovered entries,
+then rolling-tail entries, and clips pins if necessary; inspect each pin's own
+loss flags. Scope and the host's future persistence contract remain unknown.
+
+The controlled continuation experiment passed 11 independent checks in both
+arms, with identical implementations, but its distinctive constraints survived
+in retained history, **not in its summary**. The frozen post-compaction v3 judge
+did not see that history. This is an extraction mismatch, not evidence that the
+judge's question wording caused uncertainty or that summaries reliably preserve
+the task. V4 is unmeasured by hosted judges and is not a new safety policy.
+
+`review` renders v4 evidence literally. V1–v3 states/reviews, recipes, thresholds
+and defaults remain unchanged. Save new corpora, labels and predictions with new
+fingerprints; do not overwrite or reinterpret any frozen experiment.
 
 ## 2. Review and label
 

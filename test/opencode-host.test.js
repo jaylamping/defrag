@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
-for (const remoteEnabled of [false, true]) {
-  test(`OpenCode V2 loads the local plugin with remoteEnabled=${remoteEnabled} in an isolated server`,
+for (const { remoteEnabled, stateVersion } of [false, true].flatMap(remoteEnabled => [3, 4].map(stateVersion => ({ remoteEnabled, stateVersion })))) {
+  test(`OpenCode V2 loads the local plugin with remoteEnabled=${remoteEnabled}, stateVersion=${stateVersion} in an isolated server`,
     { skip: !process.env.DEFRAG_OPENCODE_BIN, timeout: 30000 }, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'defrag-host-'));
       const root = new URL('../', import.meta.url).pathname;
@@ -24,7 +24,7 @@ for (const remoteEnabled of [false, true]) {
         }
       } };`, { mode: 0o600 });
       writeFileSync(join(dir, 'opencode.json'), JSON.stringify({ $schema: 'https://opencode.ai/config.json',
-        plugins: [{ package: root, options: { remoteEnabled, keyFile } }, probe],
+        plugins: [{ package: root, options: { remoteEnabled, keyFile, stateVersion } }, probe],
         permissions: [{ action: '*', resource: '*', effect: 'allow' }],
         warming: false, compaction: { auto: false } }), { mode: 0o600 });
       // No inherited provider credentials or real configuration/service paths.

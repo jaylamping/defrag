@@ -104,7 +104,7 @@ test('v2 identifies a reconstructed compaction boundary and does not rewrite v1 
   assert.equal(v2.coverage.sourceHistory.originalTaskScope, 'not-verified');
   assert.equal(v2.coverage.omittedEntries, 0);
   assert.equal(v2.coverage.textClippedEntries, 1);
-  assert.match(run('extract', '--db', path, '--out', join(dir, 'bad-version.jsonl'), '--state-version', '4').stderr, /state-version must be/);
+  assert.match(run('extract', '--db', path, '--out', join(dir, 'bad-version.jsonl'), '--state-version', '5').stderr, /state-version must be/);
 });
 
 test('v3 retains the latest user request outside a bounded rolling tail without changing v1/v2', () => {

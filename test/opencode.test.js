@@ -279,6 +279,13 @@ test('package import contents include the plugin entrypoint and exclude private 
     || /^src\/[^/]+\.js$/.test(path)), 'only public runtime source and package documentation may be packed');
 });
 
+test('repository test scripts cannot discover executable tests inside private evaluation artifacts', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(pkg.scripts.test, 'node --test test/*.test.js');
+  assert.equal(pkg.scripts.check, 'node --check src/cli.js && node --test test/*.test.js');
+});
+
 test('known active tools other than the observer block hosted judging before it can spend', async () => {
   await hostedFixture(async ({ options, requests }) => {
     const { tools, messages, invocation } = await load(options);
@@ -306,5 +313,36 @@ test('an arbitrary execute wrapper remains active work, even if its input mentio
     assert.equal(check.decision, null);
     assert.equal(check.hostedCalls, 0);
     assert.equal(requests.length, 0);
+  });
+});
+
+test('opt-in v4 preview reports opaque retained context without returning transcript text or accessing history', async () => {
+  const { tools, messages, invocation, reads } = await load({ stateVersion: 4 });
+  messages[0] = { type: 'compaction', status: 'completed', summary: 'Checkpoint.', recent: '[User]: PRIVATE RETAINED TEXT' };
+  const p = JSON.parse((await tools.get('defrag_preview').execute({}, invocation)).content);
+  assert.equal(p.stateVersion, 4);
+  assert.equal(p.retainedContext.status, 'excluded');
+  assert.equal(p.retainedContext.reason, 'structured-source-unavailable');
+  assert.ok(!Object.hasOwn(p.retainedContext, 'entries'));
+  assert.ok(!Object.hasOwn(p.retainedContext, 'latestUser'));
+  assert.ok(!JSON.stringify(p).includes('PRIVATE RETAINED TEXT'));
+  assert.equal(reads.length, 2);
+  for (const stateVersion of [2, 5, '4']) await assert.rejects(load({ stateVersion }));
+});
+
+test('v4 hosted fixtures omit opaque retained bodies but still invalidate changes to them during judging', async () => {
+  await hostedFixture(async ({ options, requests, control }) => {
+    const { tools, messages, invocation } = await load({ ...options, stateVersion: 4 });
+    messages[0] = { type: 'compaction', status: 'completed', summary: 'Checkpoint.', recent: '[Tool result]: PRIVATE RETAINED TEXT' };
+    messages.at(-1).content[0].name = 'defrag_check';
+    const check = tools.get('defrag_check');
+    const result = JSON.parse((await check.execute({}, invocation)).content);
+    assert.equal(result.stateVersion, 4);
+    assert.equal(requests[0].state.retainedContext.status, 'excluded');
+    assert.ok(!JSON.stringify(requests).includes('PRIVATE RETAINED TEXT'));
+    control.onRequest = () => { messages[0].recent = '[Tool result]: CHANGED RETAINED TEXT'; };
+    const changed = JSON.parse((await check.execute({}, invocation)).content);
+    assert.equal(changed.error, 'stale-context');
+    assert.equal(changed.decision, null);
   });
 });

@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
+import { retainedContext } from './retained.js';
 
 export function redact(text) {
   return String(text ?? '')
@@ -8,11 +9,11 @@ export function redact(text) {
     .replace(/\b([A-Z_]*(?:API_KEY|TOKEN|SECRET|PASSWORD))\s*[=:]\s*["']?[^\s"',}]+/g, '$1=[REDACTED]');
 }
 
-export function snapshot(messages, stateVersion, startsAt, source = 'historical', secrets = []) {
+export function snapshot(messages, stateVersion, startsAt, source = 'historical', secrets = [], history) {
   const exposeLoss = stateVersion !== '1';
   const scrub = text => secrets.reduce((value, secret) => value.split(secret).join('[REDACTED]'), redact(text));
   // Text only. Tool input/output and hidden reasoning are deliberately excluded.
-  const entries = messages.filter(m => ['user', 'assistant', 'compaction'].includes(m.type)).map(m => {
+  const encodeEntry = m => {
     const original = String(m.type === 'user' ? m.text ?? '' : m.type === 'compaction' ? m.summary ?? ''
       : (m.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('\n'));
     const text = scrub(original), limit = m.type === 'assistant' ? 6000 : 3000;
@@ -21,7 +22,8 @@ export function snapshot(messages, stateVersion, startsAt, source = 'historical'
       ...(m.type === 'assistant' ? { tools: tools.slice(-12).map(p => ({ name: scrub(p.name).slice(0, 80), status: p.state?.status })) } : {}),
       ...(exposeLoss ? { loss: { textClipped: text.length > limit, redacted: text !== original,
         omittedToolStatuses: m.type === 'assistant' ? Math.max(0, tools.length - 12) : 0 } } : {}) };
-  });
+  };
+  const entries = messages.filter(m => ['user', 'assistant', 'compaction'].includes(m.type)).map(encodeEntry);
   const recent = [];
   let bytes = 0;
   for (const entry of entries.toReversed()) {
@@ -32,14 +34,16 @@ export function snapshot(messages, stateVersion, startsAt, source = 'historical'
   }
   const requestIndex = entries.findLastIndex(e => e.role === 'user');
   const request = entries[requestIndex];
+  const retained = stateVersion === '4' ? retainedContext(messages.findLast(m => m.type === 'compaction' && m.status === 'completed'), history, encodeEntry) : null;
   const buildState = () => ({ ...(exposeLoss ? { version: Number(stateVersion) } : {}), recent,
-    ...(stateVersion === '3' ? { latestRequest: request ? {
+    ...(['3', '4'].includes(stateVersion) ? { latestRequest: request ? {
       status: 'available', text: request.text,
       loss: { textClipped: request.loss.textClipped, redacted: request.loss.redacted },
       provenance: { source: 'user-message', sourceEntryIndex: requestIndex, startsAt,
         retainedInRecent: recent.includes(request), authority: 'not-verified' },
     } : { status: 'unavailable', reason: 'no-user-message-within-source-boundary',
       provenance: { startsAt, authority: 'not-verified' } } } : {}),
+    ...(retained ? { retainedContext: retained } : {}),
     coverage: { omittedEntries: entries.length - recent.length, toolContentsExcluded: true,
       historicalContextReconstructed: source === 'historical', ...(source === 'live' ? { source: 'opencode-session-context-api', observerToolExcluded: true } : {}), ...(exposeLoss ? {
         textClippedEntries: recent.filter(e => e.loss.textClipped).length,
@@ -59,11 +63,29 @@ export function snapshot(messages, stateVersion, startsAt, source = 'historical'
       state = buildState();
     }
   }
+  if (stateVersion === '4') {
+    const oversized = () => Buffer.byteLength(JSON.stringify(JSON.stringify(state))) > 22000;
+    // Historical evidence never displaces the newest available request pin.
+    while (oversized() && retained.entries.length) { retained.entries.shift(); retained.loss.omittedEntries++; }
+    while (oversized() && recent.length) { recent.shift(); state = buildState(); }
+    for (const pin of [retained.latestUser, state.latestRequest]) {
+      while (oversized() && pin?.text) {
+        pin.text = pin.text.slice(0, Math.floor(pin.text.length / 2));
+        pin.loss.textClipped = true;
+      }
+    }
+    if (oversized()) throw new Error('State v4 exceeds payload bound');
+    if (retained.status === 'recovered') {
+      retained.loss.textClippedEntries = retained.entries.filter(e => e.loss.textClipped).length;
+      retained.loss.redactedEntries = retained.entries.filter(e => e.loss.redacted).length;
+      // Counts were null during fitting; these small integers cannot grow the bound.
+    }
+  }
   return state;
 }
 
 export function extract(path, { minimum = 40000, contextLimit = null, limits = {}, stateVersion = '1' } = {}) {
-  if (!['1', '2', '3'].includes(stateVersion)) throw new Error('state-version must be 1, 2 or 3');
+  if (!['1', '2', '3', '4'].includes(stateVersion)) throw new Error('state-version must be 1, 2, 3 or 4');
   const db = new DatabaseSync(path, { readOnly: true });
   const records = [];
   try {
@@ -108,7 +130,7 @@ export function extract(path, { minimum = 40000, contextLimit = null, limits = {
         if (limit !== null && (!Number.isSafeInteger(limit) || limit <= 0)) throw new Error('Invalid model context limit');
         records.push({ version: 1, id, group: createHash('sha256').update(groupRoot(session.id)).digest('hex').slice(0, 16),
           host: 'opencode-v2', model: last.model, inputTokens, contextLimit: limit,
-          contextLimitSource: limit === null ? 'unknown' : 'user-supplied-not-historical', state: snapshot(prior, stateVersion, messages[boundary]?.type === 'compaction' ? 'compaction-summary' : 'session-start'), label: null,
+          contextLimitSource: limit === null ? 'unknown' : 'user-supplied-not-historical', state: snapshot(prior, stateVersion, messages[boundary]?.type === 'compaction' ? 'compaction-summary' : 'session-start', 'historical', [], stateVersion === '4' ? messages.slice(0, boundary) : undefined), label: null,
           review: { nextUser: next ? redact(next.text).slice(0, 6000) : null,
             suggestion: next ? 'needs-review' : 'no-follow-up', note: 'Future text is review-only, never judge input. No follow-up is not a safe label.' } });
       }
