@@ -14,8 +14,17 @@ for (const remoteEnabled of [false, true]) {
       for (const name of ['config', 'data', 'cache', 'state']) mkdirSync(join(dir, name), { mode: 0o700 });
       const keyFile = join(dir, 'key');
       writeFileSync(keyFile, 'fixture-loading-key', { mode: 0o600 });
+      const probe = join(dir, 'probe');
+      mkdirSync(probe, { mode: 0o700 });
+      writeFileSync(join(probe, 'package.json'), JSON.stringify({ type: 'module', main: './index.js' }), { mode: 0o600 });
+      writeFileSync(join(probe, 'index.js'), `export default { id: 'defrag-routing-probe', async setup(ctx) {
+        const tools = await ctx.tool.list();
+        for (const id of ${JSON.stringify(remoteEnabled ? ['defrag_preview', 'defrag_check'] : ['defrag_preview'])}) {
+          if (tools.find(t => t.id === id)?.options?.codemode !== false) throw new Error('Observer must be a direct tool');
+        }
+      } };`, { mode: 0o600 });
       writeFileSync(join(dir, 'opencode.json'), JSON.stringify({ $schema: 'https://opencode.ai/config.json',
-        plugins: [{ package: root, options: { remoteEnabled, keyFile } }], warming: false, compaction: { auto: false } }), { mode: 0o600 });
+        plugins: [{ package: root, options: { remoteEnabled, keyFile } }, probe], warming: false, compaction: { auto: false } }), { mode: 0o600 });
       // No inherited provider credentials or real configuration/service paths.
       const env = { PATH: process.env.PATH, HOME: dir, XDG_CONFIG_HOME: join(dir, 'config'),
         XDG_DATA_HOME: join(dir, 'data'), XDG_CACHE_HOME: join(dir, 'cache'), XDG_STATE_HOME: join(dir, 'state'), TMPDIR: dir };
@@ -38,18 +47,21 @@ for (const remoteEnabled of [false, true]) {
         };
         assert.equal(request('/api/info').pid, child.pid, 'requests must reach the test server, never the user service');
         request('/api/command');
-        let plugin;
+        let plugin, routing;
         // Loading is asynchronous. Bound readiness checks; do not start a model.
-        for (let attempt = 0; attempt < 20 && !plugin; attempt++) {
+        for (let attempt = 0; attempt < 20 && (!plugin || !routing); attempt++) {
           const { data, location } = request(`/api/plugin?location[directory]=${encodeURIComponent(dir)}`);
           assert.equal(location.directory, dir);
           plugin = data.find(p => p.id === 'defrag' || p.state.status === 'failed');
-          if (!plugin) await delay(100);
+          routing = data.find(p => p.id === 'defrag-routing-probe' || p.state.status === 'failed');
+          if (!plugin || !routing) await delay(100);
         }
         assert.ok(plugin, 'the actual host must discover the package entrypoint');
         assert.equal(plugin.state.status, 'active', 'the actual host must run plugin setup successfully');
         assert.equal(plugin.id, 'defrag');
         assert.equal(plugin.features.server, true);
+        assert.equal(routing?.id, 'defrag-routing-probe');
+        assert.equal(routing.state.status, 'active', 'actual host registrations must keep the observers outside Code Mode');
       } finally {
         if (child.pid && child.exitCode === null) child.kill('SIGTERM');
         const force = setTimeout(() => child.kill('SIGKILL'), 2000);

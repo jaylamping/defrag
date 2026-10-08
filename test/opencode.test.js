@@ -56,11 +56,23 @@ test('local plugin import registers a current-session preview without credential
   assert.equal(p.stateVersion, 3);
   assert.equal(p.latestRequest.status, 'available');
   assert.equal(p.observerToolExcluded, true);
+  assert.equal(p.activeTools, 0);
   assert.match(p.fingerprint, /^[a-f0-9]{64}$/);
   assert.ok(p.encodedStateBytes <= 22000);
   assert.ok(reads.every(([, sessionID]) => sessionID === invocation.sessionID));
   for (const secret of ['fictional-secret', 'PRIVATE REASONING', 'PRIVATE PATH', 'PRIVATE OUTPUT', 'diagnostic question']) assert.ok(!result.content.includes(secret));
   if (cleanup) await cleanup();
+});
+
+test('adviser tools bypass Code Mode so the recorded caller is the observer, not an execute wrapper', async () => {
+  const preview = await load();
+  assert.equal(preview.tools.get('defrag_preview').options?.codemode, false);
+  await hostedFixture(async ({ options, requests }) => {
+    const { tools } = await load(options);
+    assert.equal(tools.get('defrag_check').options.codemode, false);
+    assert.equal(tools.get('defrag_check').options.permission, 'defrag.remote');
+    assert.equal(requests.length, 0);
+  });
 });
 
 async function hostedFixture(callback) {
@@ -283,6 +295,21 @@ test('known active tools other than the observer block hosted judging before it 
       assert.equal(p.error, 'busy');
       assert.equal(p.hostedCalls, 0);
     }
+    assert.equal(requests.length, 0);
+  });
+});
+
+test('an arbitrary execute wrapper remains active work, even if its input mentions the adviser', async () => {
+  await hostedFixture(async ({ options, requests }) => {
+    const { tools, messages, invocation } = await load(options);
+    messages.at(-1).content[0] = { type: 'tool', id: invocation.id, name: 'execute',
+      state: { status: 'running', input: { code: 'await tools.defrag_check(); await tools.shell({command: "real work"});' } } };
+    const preview = JSON.parse((await tools.get('defrag_preview').execute({}, invocation)).content);
+    assert.equal(preview.activeTools, 1);
+    const check = JSON.parse((await tools.get('defrag_check').execute({}, invocation)).content);
+    assert.equal(check.error, 'busy');
+    assert.equal(check.decision, null);
+    assert.equal(check.hostedCalls, 0);
     assert.equal(requests.length, 0);
   });
 });

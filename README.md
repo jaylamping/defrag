@@ -62,6 +62,11 @@ In a session in the configured project, ask your agent:
 
 > Run `defrag_preview` once. Report its metadata only; do not compact or do any other work.
 
+Both adviser tools are registered as direct tools (`codemode: false`), not
+calls nested inside `execute`. Code Mode records only its outer wrapper, so
+nesting an observer there would count that wrapper as active work. Arbitrary
+`execute` calls remain blockers; defrag does not inspect their code to excuse them.
+
 The tool returns a snapshot fingerprint, request availability/loss/provenance,
 coverage and encoded size, **not transcript text or a safety judgment**. It reads
 only the caller's session through the V2 API; it does not scan the historical

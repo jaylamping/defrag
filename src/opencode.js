@@ -53,6 +53,9 @@ export default {
       editor.add({ name: 'defrag_preview',
         description: 'Manually preview a bounded, redacted compaction-check snapshot of this session. Local only; no credentials, hosted inference or compaction. Returns metadata, not transcript text. This experimental snapshot is not proof that compaction is safe.',
         input: { type: 'object', properties: {}, additionalProperties: false },
+        // Code Mode persists only the outer execute call. A direct tool gives
+        // capture an identifiable observer without hiding arbitrary wrappers.
+        options: { codemode: false },
         execute: async (_, caller) => {
           const invocation = bounded(caller);
           try {
@@ -69,7 +72,7 @@ export default {
       if (remoteEnabled) editor.add({ name: 'defrag_check',
         description: 'Manually ask Jev to assess this session using experimental state-v3/checkpoint-v2. Requires a fresh user permission for each request. Advisory only: never compacts, retries, changes prompts or installs automatic monitoring. Not validated safety or accuracy.',
         input: { type: 'object', properties: {}, additionalProperties: false },
-        options: { permission: 'defrag.remote' },
+        options: { permission: 'defrag.remote', codemode: false },
         execute: async (_, caller) => {
           const invocation = bounded(caller);
           if (checking.has(invocation.sessionID)) return { content: JSON.stringify({ mode: 'hosted-check', advisoryOnly: true,
