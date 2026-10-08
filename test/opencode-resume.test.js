@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
@@ -16,6 +17,8 @@ test('isolated OpenCode restart preserves explicit fixture locators and typed-me
       warming: false, compaction: { auto: false },
       permissions: [{ action: '*', resource: '*', effect: 'allow' }] }), { mode: 0o600 });
     const record = '# Synthetic continuation fixture\n\nHistorical instruction: wait for a new typed user authorization.\n';
+    const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+    const expectedRecordDigest = digest(record);
     writeFileSync(join(dir, 'continuation.md'), record, { mode: 0o600 });
     const env = { PATH: process.env.PATH, HOME: dir, XDG_CONFIG_HOME: join(dir, 'config'),
       XDG_DATA_HOME: join(dir, 'data'), XDG_CACHE_HOME: join(dir, 'cache'), XDG_STATE_HOME: join(dir, 'state'), TMPDIR: dir };
@@ -103,6 +106,31 @@ test('isolated OpenCode restart preserves explicit fixture locators and typed-me
         assert.deepEqual(info.tokens, template.tokens, 'no inference may add token usage');
       }
       assert.equal(readFileSync(join(dir, 'continuation.md'), 'utf8'), record);
+      // The test harness supplies the locator and expected digest explicitly.
+      // This checks host transport and current bytes, not autonomous discovery,
+      // semantic consistency, model continuation or user authorization.
+      const recordPath = '/api/fs/read/continuation.md?location%5Bdirectory%5D=' + encodeURIComponent(dir);
+      const readFromHost = () => spawnSync(process.env.DEFRAG_OPENCODE_BIN, ['api', 'get', recordPath],
+        { cwd: dir, env, timeout: 5000, maxBuffer: 65536 });
+      const readback = readFromHost();
+      assert.equal(readback.status, 0, 'isolated host file read must succeed; diagnostics withheld');
+      assert.equal(digest(readback.stdout), expectedRecordDigest, 'host must return exact saved bytes after restart');
+      assert.equal(readback.stdout.toString('utf8'), record);
+      assert.deepEqual(capture(cases[2].id), initial[2], 'file readback must not rewrite the typed request or context');
+
+      writeFileSync(join(dir, 'continuation.md'), record.replace('wait for a new typed user authorization', 'implement immediately'), { mode: 0o600 });
+      const changed = readFromHost();
+      assert.equal(changed.status, 0, 'host can read a changed record without certifying it');
+      assert.notEqual(digest(changed.stdout), expectedRecordDigest, 'harness integrity check must detect changed bytes');
+      assert.deepEqual(capture(cases[2].id), initial[2], 'a changed record must not become a new typed instruction');
+
+      unlinkSync(join(dir, 'continuation.md'));
+      const missing = readFromHost();
+      assert.equal(missing.status, 1, 'host must fail when the explicit record is missing');
+      assert.notEqual(digest(missing.stdout), expectedRecordDigest, 'missing file must not return cached record bytes');
+      assert.equal(JSON.parse(missing.stdout.toString('utf8'))._tag, 'FileNotFoundError', 'host returns a typed error, not record content');
+      assert.match(missing.stderr.toString('utf8'), /^HTTP 404\b/, 'missing fixture must be classified without relaying diagnostics');
+      assert.deepEqual(capture(cases[2].id), initial[2], 'missing evidence must not rewrite session context');
     } finally {
       await stop();
       rmSync(dir, { recursive: true });

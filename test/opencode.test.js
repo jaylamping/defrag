@@ -163,6 +163,78 @@ test('a hosted recommendation becomes an abstention if session evidence changes 
   });
 });
 
+test('persisting the calling observer message stream timestamp does not invalidate unchanged evidence', async () => {
+  for (const stateVersion of [3, 4]) {
+    for (const streamed of [undefined, 4]) {
+      await hostedFixture(async ({ options, requests, control }) => {
+        const { tools, messages, invocation, cleanup } = await load({ ...options, stateVersion });
+        messages.at(-1).content[0].name = 'defrag_check';
+        messages.at(-1).time = { created: 4, ...(streamed === undefined ? {} : { streamed }) };
+        control.onRequest = () => { messages.at(-1).time.streamed = 5; };
+        const result = JSON.parse((await tools.get('defrag_check').execute({}, invocation)).content);
+        assert.equal(requests.length, 1);
+        assert.equal(result.error, undefined);
+        assert.equal(result.stateUnchanged, true);
+        assert.equal(result.decision, true, 'loopback fixture recommendation must survive observer-only stream bookkeeping');
+        assert.equal(result.compactionRequested, false);
+        assert.equal(messages.at(-1).time.streamed, 5, 'capture must not mutate host data');
+        await cleanup();
+      });
+    }
+  }
+});
+
+test('stream timestamp normalization does not hide other message or observer lifecycle changes', async () => {
+  for (const mutate of [
+    messages => { messages[1].time.streamed = 5; },
+    messages => { messages.at(-1).time.created = 5; },
+    messages => { messages.at(-1).time.completed = 5; },
+    messages => { messages.at(-1).finish = 'stop'; },
+    messages => { messages.at(-1).content.push({ type: 'text', text: 'A new unresolved obligation.' }); },
+    messages => { messages.at(-1).content.push({ type: 'reasoning', text: 'CHANGED PRIVATE REASONING' }); },
+    messages => { messages.at(-1).content.push({ type: 'tool', id: 'other_call', name: 'shell', state: { status: 'running' } }); },
+    messages => { messages.at(-1).metadata = { newWorkflowState: true }; },
+  ]) {
+    await hostedFixture(async ({ options, requests, control }) => {
+      const { tools, messages, invocation, cleanup } = await load(options);
+      messages.at(-1).content[0].name = 'defrag_check';
+      messages.at(-1).time = { created: 4 };
+      control.onRequest = () => { messages.at(-1).time.streamed = 5; mutate(messages); };
+      const result = JSON.parse((await tools.get('defrag_check').execute({}, invocation)).content);
+      assert.equal(requests.length, 1);
+      assert.equal(result.decision, null);
+      assert.equal(result.error, 'stale-context');
+      assert.equal(result.stateUnchanged, false);
+      assert.ok(!Object.hasOwn(result, 'axes'));
+      assert.equal(result.compactionRequested, false);
+      await cleanup();
+    });
+  }
+});
+
+test('observer stream bookkeeping does not hide session agent, model or revert changes', async () => {
+  for (const [field, changed] of [
+    ['agent', 'plan'], ['model', { providerID: 'fixture', id: 'different' }], ['revert', { messageID: 'msg_request' }],
+  ]) {
+    await hostedFixture(async ({ options, requests, control }) => {
+      const session = { agent: 'build', model: { providerID: 'fixture', id: 'original' } };
+      const { tools, messages, invocation, cleanup } = await load(options, {
+        get: async () => ({ location: { directory: '/fictional/project' }, ...structuredClone(session) }),
+      });
+      messages.at(-1).content[0].name = 'defrag_check';
+      messages.at(-1).time = { created: 4 };
+      control.onRequest = () => { messages.at(-1).time.streamed = 5; session[field] = changed; };
+      const result = JSON.parse((await tools.get('defrag_check').execute({}, invocation)).content);
+      assert.equal(requests.length, 1);
+      assert.equal(result.decision, null);
+      assert.equal(result.error, 'stale-context');
+      assert.equal(result.stateUnchanged, false);
+      assert.equal(result.compactionRequested, false);
+      await cleanup();
+    });
+  }
+});
+
 test('stopping the calling session cancels the outstanding judge request without retries', async () => {
   await hostedFixture(async ({ options, requests, control }) => {
     const { tools, messages, invocation } = await load(options);

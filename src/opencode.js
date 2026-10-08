@@ -14,9 +14,17 @@ async function capture(ctx, invocation, secrets = [], stateVersion = 3) {
   const messages = await ctx.session.context({ sessionID }, { signal: invocation.signal });
   if (!Array.isArray(messages)) throw new Error('context');
   const boundary = messages.findLastIndex(m => m.type === 'compaction' && m.status === 'completed');
-  const visible = messages.slice(Math.max(0, boundary)).map(m => m.type === 'assistant' && m.id === invocation.messageID
-    ? { ...m, content: (m.content ?? []).filter(p => !(p.type === 'tool' && p.id === invocation.id && ['defrag_preview', 'defrag_check'].includes(p.name))) }
-    : m);
+  const visible = messages.slice(Math.max(0, boundary)).map(m => {
+    if (m.type !== 'assistant' || m.id !== invocation.messageID) return m;
+    const parts = m.content ?? [];
+    const content = parts.filter(p => !(p.type === 'tool' && p.id === invocation.id && ['defrag_preview', 'defrag_check'].includes(p.name)));
+    if (content.length === parts.length) return m;
+    // OpenCode can persist this message's streamed timestamp while its observer
+    // tool is awaiting the judge. Exclude only that bookkeeping field alongside
+    // the identified observer; retain created/completed and all other evidence.
+    const time = m.time ? Object.fromEntries(Object.entries(m.time).filter(([key]) => key !== 'streamed')) : m.time;
+    return { ...m, ...(m.time ? { time } : {}), content };
+  });
   invocation.signal?.throwIfAborted();
   return { state: snapshot(visible, String(stateVersion), boundary >= 0 ? 'compaction-summary' : 'session-context-boundary', 'live', secrets),
     revision: fingerprint({ messages: visible, agent: session.agent, model: session.model, revert: session.revert }),

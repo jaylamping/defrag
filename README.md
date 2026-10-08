@@ -128,7 +128,10 @@ experimental judge's answer, **not calibrated safety or permission to compact**.
 The adapter rechecks local context after inference and withholds changed results
 as `decision: null, error: stale-context`. The revision check includes excluded
 tool contents, not just retained text. Stops and plugin unload cancel outstanding
-work; simultaneous checks on the same session or known active non-observer
+work. Only the identified calling observer message's `time.streamed` bookkeeping
+is excluded from revision comparison: OpenCode can persist it while the check is
+running. Content, other timestamps, lifecycle and session-setting changes remain
+guarded. Simultaneous checks on the same session or known active non-observer
 tools abstain as `busy` before hosted work. This does not verify every background
 worker, pending inbox item or external prerequisite.
 
