@@ -6,6 +6,7 @@ import { label, score } from './evaluation.js';
 import { predict } from './predict.js';
 import { sample, review } from './review.js';
 import { benchmark } from './benchmark.js';
+import { replay } from './replay.js';
 
 const [command, ...args] = process.argv.slice(2);
 const options = {};
@@ -15,6 +16,7 @@ const allowed = {
   label: ['corpus', 'out', 'id', 'decision', 'reviewer', 'note'],
   score: ['corpus', 'labels', 'predictions', 'out'],
   predict: ['corpus', 'out', 'judge', 'endpoint', 'model', 'threshold', 'timeout', 'count', 'allow-remote', 'key-file', 'recipe'],
+  replay: ['corpus', 'predictions', 'out', 'floor'],
   bench: ['corpus', 'out', 'manifest', 'candidate', 'runtime', 'worker', 'repeats', 'count', 'timeout', 'device'],
 };
 try {
@@ -52,6 +54,12 @@ try {
     const predictions = await predict(selected, options);
     writeLines(options.out, predictions);
     console.log(JSON.stringify({ predictions: predictions.length, abstentions: predictions.filter(p => p.decision === null).length, output: options.out }));
+  } else if (command === 'replay') {
+    if (!options.corpus || !options.predictions || !options.out || !options.floor) throw new Error('replay requires --corpus, --predictions, --out and --floor');
+    const predictions = replay(readLines(options.corpus), readLines(options.predictions), options);
+    writeLines(options.out, predictions);
+    console.log(JSON.stringify({ predictions: predictions.length, recommendations: predictions.filter(p => p.decision === true).length,
+      abstentions: predictions.filter(p => p.decision === null).length, hostedCalls: 0, accuracy: null, output: options.out }));
   } else if (command === 'review') {
     if (!options.corpus || !options.out) throw new Error('review requires --corpus and --out');
     const records = sample(readLines(options.corpus), positiveInteger(options.count, 20));
@@ -63,7 +71,7 @@ try {
     writePrivate(options.out, JSON.stringify(report, null, 2) + '\n');
     console.log(JSON.stringify({ candidate: report.candidate, checkpoints: report.checkpoints, startupMs: report.startupMs, warm: report.warm,
       abstentions: report.abstentions, memory: report.memory, accuracy: null, output: options.out }));
-  } else throw new Error('Usage: defrag extract|review|label|score|predict|bench (see README for options)');
+  } else throw new Error('Usage: defrag extract|review|label|score|predict|replay|bench (see README for options)');
 } catch (error) {
   // Never dump stack traces or source transcript contents into shared output.
   console.error(error.code === 'EEXIST' ? 'Output exists; choose a new path.' : error.message);

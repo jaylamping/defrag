@@ -19,7 +19,8 @@ Decisions has fixture tests and three successful live pilot requests, but is
 not a selected replacement.
 Local comparisons are secondary, not a change to the chosen default.
 An opt-in **checkpoint-v2** question recipe and **state v2** extraction format
-are implemented for local contract testing; neither has hosted accuracy evidence.
+have local contract tests and a bounded hosted behavior pilot; neither has
+measured accuracy evidence.
 
 Requires Node.js 24 or newer. No dependencies or installation needed:
 
@@ -262,9 +263,85 @@ The recipe was informed by 21 fictional checkpoints reviewed blindly by Opus
 and Fable. Their agreement is provisional AI evidence, not human ground truth.
 Local fixtures cover the policy gates and request/response contracts; replaying
 those 21 inputs through canned responses checks transport only, not whether
-either provider answers the new questions correctly. No hosted v2 trial has
-been run. Human-reviewed natural checkpoints and controlled continuation after
-native compaction are still needed before a default or safety claim changes.
+either provider answers the new questions correctly.
+
+A separately approved pilot ran 12 judgments without retries: three real
+checkpoints, both providers, both recipes, using matching state-v2 fingerprints.
+All responses validated. Both providers recommended all three with v1 and
+withheld all three as uncertain with v2. Every v2 response chose `unclear` for
+scope and preservation; this was not merely a floor effect. One reconstructed
+snapshot had a clipped entry despite zero whole-entry omissions. The resolved
+models were `jev-1.13.0` and `gpt-6-luna`. This is a behavior/connectivity result,
+not proof that v2 is more accurate; the checkpoints have no human-reviewed
+ground truth.
+
+A second separately approved probe used six existing fictional checkpoints:
+three provisional positive controls and three matched negative controls from
+prior blind Opus/Fable reviews. Both providers ran unchanged v2, for 12 more
+successful judgments with no retries. Neither recommended any control. Jev
+selected all four positive choices on all three positive controls; Decisions
+did so on two. Those five judgments were blocked only by probabilities below
+the fixed 0.9 floor. In the remaining Decisions positive control, scope was
+`unclear`. Both providers chose `unrecoverable` for the two lost-preservation
+negative controls and `owed` for the execute-now negative control.
+
+These selected controls show question-level discrimination but an overly
+restrictive recommendation policy on the provisional positive cases. They do
+not establish accuracy, calibration or a replacement threshold. Inputs and
+questions were not modified; no confidence floor or production default changed.
+The controls lack v2 within-entry loss counters, and the pause/execute pair also
+differs in whether the latest permission was durably recorded. Confidence policy
+needs separate evaluation on disjoint evidence, followed by human-reviewed
+natural checkpoints and controlled continuation after native compaction. Both
+bounded pilot approvals are consumed; neither authorizes additional hosted calls.
+
+### Offline confidence-policy replay
+
+`replay` uses saved, validated hosted `checkpoint-v2` axes. It makes
+**no network requests**, reads no credentials and does not change the live
+recipe's fixed 0.9 floor. Select a candidate floor explicitly:
+
+```sh
+node src/cli.js replay --corpus eval/data/checkpoints-v2.jsonl \
+  --predictions eval/results/jev-checkpoint-v2.jsonl \
+  --out eval/results/jev-offline-floor-07.jsonl --floor 0.7
+```
+
+The number is an ablation example, **not a recommended deployment threshold**.
+Numeric floors must be in `(0, 1]`. `--floor choices` is an explicitly
+experimental choice-only ablation: all four selected answers must still be
+positive, but no probability floor is applied. Negative or `unclear` choices
+always block a recommendation, even under this ablation.
+
+Source fingerprints must match the supplied corpus; duplicate or non-v2 sources
+are rejected. Distributions and the original score/decision/floor are revalidated
+instead of trusting cached derived fields. Failed source judgments stay
+abstentions; malformed or contradictory saved axes also abstain. Original files
+are never overwritten, and outputs use the same private/exclusive file rules.
+
+Each replay has a distinct `offline-v1:<source-judge>:floor-<value>` identity,
+with `floor-choices` for the choice-only case. Outputs retain source identity,
+original decision/floor and source latency separately. Top-level `latencyMs`
+measures **local rescoring**, not new hosted inference, and there is no new
+inference `usage`. `choiceBlockedBy` identifies nonpositive choices;
+`confidenceBlockedBy` identifies positive choices below the candidate floor.
+`blockedBy` includes both. The confident-negative `unsafe` assessment retains
+the original v2 0.9 criterion; a withheld recommendation otherwise stays
+`uncertain`.
+
+Replaying these development controls can diagnose gate sensitivity, not calibrate
+probabilities or establish accuracy. Do not select a winning floor on these
+same cases and call it validation. Separate reviewed session families and
+controlled continuation evidence are needed before adopting any policy.
+
+An offline development sweep replayed the saved control and real-checkpoint v2
+judgments at 0.9, 0.8, 0.7, 0.5 and choice-only, without new inference. The 0.9
+replay exactly reproduced the saved decisions. Choice-only admitted three
+provisional positive Jev controls and two Decisions controls; no negative
+controls or the three real checkpoints were recommended by either provider.
+The real checkpoints retained explicit nonpositive choices at every candidate
+floor. This separates confidence-floor sensitivity from missing-evidence gates,
+but does not validate choice-only or select a deployment policy.
 
 ### Optional local comparisons
 
@@ -383,6 +460,9 @@ credentials, input/response bounds, redirect rejection and transport failures.
 V2 fixtures cover retained-entry clipping/redaction, unknown source completeness,
 compaction-summary provenance, unchanged v1 state, four-axis question translation,
 fixed-floor gates, uncertain/unsafe distinction and malformed/refused axes.
+Offline replay fixtures cover explicit floors, choice-only gates, source failure
+preservation, distribution revalidation, stale/duplicate inputs, separate provider
+identities, blocker categories, private outputs and no new inference attribution.
 They do not establish real model accuracy or live IDE
 compatibility.
 
