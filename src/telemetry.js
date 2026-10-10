@@ -37,8 +37,8 @@ function event(input, eventID) {
   const retained = state?.retainedContext, result = input.result ?? {};
   return { version: 1, eventID, timestamp: new Date().toISOString(),
     sessionHash: typeof input.sessionID === 'string' ? createHash('sha256').update(input.sessionID).digest('hex') : null,
-    mode: select(input.mode, ['local-preview', 'hosted-check']), stateVersion: select(input.stateVersion, [3, 4]),
-    target: select(input.target, ['none', 'hosted-jev', 'loopback-fixture']),
+    mode: select(input.mode, ['local-preview', 'hosted-check', 'automatic-check', 'automatic-compaction']), stateVersion: select(input.stateVersion, [3, 4]),
+    target: select(input.target, ['none', 'hosted-jev', 'loopback-fixture', 'native-host']),
     durationMs: milliseconds(input.durationMs),
     timings: Object.fromEntries(['captureMs', 'judgeMs', 'revalidateMs'].map(key => [key, milliseconds(input.timings?.[key])])),
     snapshot: snapshot ? {
@@ -55,9 +55,25 @@ function event(input, eventID) {
         rawTranscriptExcluded: boolean(retained.loss?.rawTranscriptExcluded), contentExcluded: boolean(retained.loss?.contentExcluded) } : null,
     } : null,
     hostedCalls: integer(result.hostedCalls), stateUnchanged: boolean(result.stateUnchanged),
-    error: select(result.error, ['busy', 'stale-context', 'cancelled', 'response', 'http', 'input', 'authentication', 'rate-limit', 'server', 'timeout', 'network', 'context']),
+    error: select(result.error, ['busy', 'stale-context', 'cancelled', 'response', 'http', 'input', 'authentication', 'rate-limit', 'server', 'timeout', 'network', 'context',
+      'automatic-ineligible', 'automatic-busy', 'automatic-budget', 'automatic-duplicate', 'automatic-cooldown', 'automatic-permission',
+      'automatic-expired', 'automatic-telemetry', 'automatic-ledger', 'automatic-context', 'host-api', 'native-compaction-failed']),
+    ineligibleReason: select(input.ineligibleReason, ['foreign-location', 'session-mismatch', 'child-session', 'archived-session',
+      'unsuccessful-session', 'stale-idle', 'invalid-context', 'missing-idle', 'unsuccessful-idle', 'stale-idle-message',
+      'invalid-idle-id', 'missing-assistant', 'unfinished-assistant', 'active-tool', 'unknown-input-usage', 'below-minimum-input']),
     httpStatus: Number.isInteger(input.httpStatus) && input.httpStatus >= 100 && input.httpStatus <= 599 ? input.httpStatus : null,
-    recipe: input.mode === 'hosted-check' ? 'checkpoint-v2' : null, compactionRequested: false,
+    recipe: ['hosted-check', 'automatic-check'].includes(input.mode) && result.trigger !== 'hard-limit' ? 'checkpoint-v2' : null,
+    trigger: select(result.trigger, ['jev', 'hard-limit']),
+    pressure: input.pressure ? { ...counts(input.pressure, ['inputTokens', 'usedTokens', 'contextTokens']),
+      hardLimitRatio: number(input.pressure.hardLimitRatio) !== null && input.pressure.hardLimitRatio > 0 && input.pressure.hardLimitRatio <= 1
+        ? input.pressure.hardLimitRatio : null } : null,
+    compactionRequested: ['automatic-check', 'automatic-compaction'].includes(input.mode) && result.compactionRequested === true,
+    compactionStatus: select(result.compactionStatus, ['admitted', 'completed', 'failed', 'unknown']),
+    nativeCompaction: input.nativeCompaction ? {
+      modelHash: typeof input.nativeCompaction.modelHash === 'string' && /^[a-f0-9]{64}$/.test(input.nativeCompaction.modelHash) ? input.nativeCompaction.modelHash : null,
+      cost: number(input.nativeCompaction.cost), tokens: counts(input.nativeCompaction.tokens, ['input', 'output', 'reasoning']),
+      cache: counts(input.nativeCompaction.tokens?.cache, ['read', 'write']),
+    } : null,
     result: judgment(result, input.secret),
     discardedJudgment: input.discardedJudgment ? judgment(input.discardedJudgment, input.secret) : null };
 }

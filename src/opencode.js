@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path';
 import { snapshot } from './corpus.js';
 import { configureJev, judgeJev } from './jev.js';
 import { createTelemetry } from './telemetry.js';
+import { startAutomatic } from './automatic.js';
 
 const fingerprint = state => createHash('sha256').update(JSON.stringify(state)).digest('hex');
 
@@ -18,13 +19,13 @@ function timed(trace, name, operation) {
   return operation().finally(() => { trace.timings[name] = performance.now() - started; });
 }
 
-async function capture(ctx, invocation, secrets = [], stateVersion = 3) {
+async function capture(ctx, invocation, secrets = [], stateVersion = 3, preloaded) {
   invocation.signal?.throwIfAborted();
   const sessionID = invocation.sessionID;
   if (typeof sessionID !== 'string' || !sessionID.startsWith('ses')) throw new Error('session');
-  const session = await ctx.session.get({ sessionID }, { signal: invocation.signal });
-  if (session.location?.directory !== ctx.location.directory) throw new Error('location');
-  const messages = await ctx.session.context({ sessionID }, { signal: invocation.signal });
+  const session = preloaded?.session ?? await ctx.session.get({ sessionID }, { signal: invocation.signal });
+  if (session.location?.directory !== ctx.location.directory || session.location?.workspaceID !== ctx.location.workspaceID) throw new Error('location');
+  const messages = preloaded?.messages ?? await ctx.session.context({ sessionID }, { signal: invocation.signal });
   if (!Array.isArray(messages)) throw new Error('context');
   const boundary = messages.findLastIndex(m => m.type === 'compaction' && m.status === 'completed');
   const visible = messages.slice(Math.max(0, boundary)).map(m => {
@@ -39,8 +40,9 @@ async function capture(ctx, invocation, secrets = [], stateVersion = 3) {
     return { ...m, ...(m.time ? { time } : {}), content };
   });
   invocation.signal?.throwIfAborted();
-  return { state: snapshot(visible, String(stateVersion), boundary >= 0 ? 'compaction-summary' : 'session-context-boundary', 'live', secrets),
-    revision: fingerprint({ messages: visible, agent: session.agent, model: session.model, revert: session.revert }),
+  return { session, messages: visible, state: snapshot(visible, String(stateVersion), boundary >= 0 ? 'compaction-summary' : 'session-context-boundary', 'live', secrets),
+    revision: fingerprint({ messages: visible, agent: session.agent, model: session.model, revert: session.revert,
+      permissions: session.permissions, outcome: session.outcome, idle: session.time?.idle, archived: session.time?.archived, location: session.location }),
     activeTools: visible.flatMap(m => m.type === 'assistant' ? m.content ?? [] : [])
       .filter(p => p.type === 'tool' && ['running', 'streaming'].includes(p.state?.status)).length };
 }
@@ -68,6 +70,7 @@ export default {
     };
     const keyFile = options.keyFile, endpoint = options.endpoint;
     const telemetry = await createTelemetry(options.telemetry);
+    let automatic;
     const execute = (mode, operation) => async (_, caller) => {
       const started = telemetry ? performance.now() : 0;
       const trace = telemetry ? { mode, sessionID: caller.sessionID, stateVersion, timings: {},
@@ -79,6 +82,36 @@ export default {
         result.telemetry = { ...receipt, ...telemetry.status() };
       }
       return { content: JSON.stringify(result) };
+    };
+    const assess = async (caller, trace, preloaded) => {
+      const invocation = bounded(caller);
+      if (checking.has(invocation.sessionID)) return { mode: 'hosted-check', advisoryOnly: true,
+        compactionRequested: false, hostedCalls: 0, decision: null, error: 'busy' };
+      checking.add(invocation.sessionID);
+      let hostedCalls = 0;
+      try {
+        invocation.signal.throwIfAborted();
+        const configuration = configureJev({ 'allow-remote': 'yes', 'key-file': keyFile, endpoint });
+        if (trace) trace.secret = configuration.key;
+        const captured = await timed(trace, 'captureMs', () => capture(ctx, invocation, [configuration.key], stateVersion, preloaded));
+        const { state, revision, activeTools } = captured;
+        if (trace) { trace.snapshot = snapshotMetadata(captured); trace.revision = revision; }
+        if (activeTools) return { mode: 'hosted-check', advisoryOnly: true,
+          compactionRequested: false, hostedCalls: 0, decision: null, error: 'busy' };
+        hostedCalls = 1;
+        const result = await timed(trace, 'judgeMs', () => judgeJev({ state }, configuration, timeout, 'checkpoint-v2', invocation.signal));
+        if (trace) trace.judgment = result;
+        const current = await timed(trace, 'revalidateMs', () => capture(ctx, invocation, [configuration.key], stateVersion));
+        if (current.revision !== revision) return { mode: 'hosted-check', advisoryOnly: true,
+          compactionRequested: false, hostedCalls, decision: null, error: 'stale-context', stateUnchanged: false };
+        return { mode: 'hosted-check', advisoryOnly: true, compactionRequested: false,
+          hostedCalls, recipe: 'checkpoint-v2', stateVersion, fingerprint: trace?.snapshot.fingerprint ?? fingerprint(state), stateUnchanged: true,
+          ...result, warning: 'Live context approximation, not an idle checkpoint or authorization to compact. Accuracy and host persistence are unverified.' };
+      } catch (error) {
+        if (trace) trace.httpStatus = error?.httpStatus;
+        return { mode: 'hosted-check', advisoryOnly: true, compactionRequested: false,
+          hostedCalls, decision: null, error: failure(caller, invocation, error) };
+      } finally { checking.delete(invocation.sessionID); }
     };
     await ctx.tool.transform(editor => {
       editor.add({ name: 'defrag_preview',
@@ -101,6 +134,7 @@ export default {
               stateVersion, fingerprint: metadata.fingerprint, encodedStateBytes: metadata.encodedStateBytes,
               ...(retainedMetadata ? { retainedContext: retainedMetadata } : {}),
               latestRequest, coverage: state.coverage, observerToolExcluded: true, activeTools,
+              ...(automatic ? { automatic: automatic.status() } : {}),
               warning: 'Live context approximation, not an idle checkpoint or verified scope/persistence. No safety judgment has been made.' };
           } catch (error) { return { mode: 'local-preview', advisoryOnly: true, hostedCalls: 0,
             compactionRequested: false, decision: null, error: failure(caller, invocation, error) }; }
@@ -110,38 +144,13 @@ export default {
         description: 'Manually ask Jev to assess this session using experimental checkpoint-v2 and configured state v3 (default) or v4. Available only with installation-time hosted opt-in. Sends bounded, best-effort-redacted session text to Jev; costs may apply. Does not force permission prompts in Allow All mode. Advisory only: never compacts, retries, changes prompts or installs automatic monitoring. Not validated safety or accuracy.',
         input: { type: 'object', properties: {}, additionalProperties: false },
         options: { permission: 'defrag.remote', codemode: false },
-        execute: execute('hosted-check', async (caller, trace) => {
-          const invocation = bounded(caller);
-          if (checking.has(invocation.sessionID)) return { mode: 'hosted-check', advisoryOnly: true,
-            compactionRequested: false, hostedCalls: 0, decision: null, error: 'busy' };
-          checking.add(invocation.sessionID);
-          let hostedCalls = 0;
-          try {
-            invocation.signal.throwIfAborted();
-            const configuration = configureJev({ 'allow-remote': 'yes', 'key-file': keyFile, endpoint });
-            if (trace) trace.secret = configuration.key;
-            const captured = await timed(trace, 'captureMs', () => capture(ctx, invocation, [configuration.key], stateVersion));
-            const { state, revision, activeTools } = captured;
-            if (trace) trace.snapshot = snapshotMetadata(captured);
-            if (activeTools) return { mode: 'hosted-check', advisoryOnly: true,
-              compactionRequested: false, hostedCalls: 0, decision: null, error: 'busy' };
-            hostedCalls = 1;
-            const result = await timed(trace, 'judgeMs', () => judgeJev({ state }, configuration, timeout, 'checkpoint-v2', invocation.signal));
-            if (trace) trace.judgment = result;
-            const current = await timed(trace, 'revalidateMs', () => capture(ctx, invocation, [configuration.key], stateVersion));
-            if (current.revision !== revision) return { mode: 'hosted-check', advisoryOnly: true,
-              compactionRequested: false, hostedCalls, decision: null, error: 'stale-context', stateUnchanged: false };
-            return { mode: 'hosted-check', advisoryOnly: true, compactionRequested: false,
-              hostedCalls, recipe: 'checkpoint-v2', stateVersion, fingerprint: trace?.snapshot.fingerprint ?? fingerprint(state), stateUnchanged: true,
-              ...result, warning: 'Live context approximation, not an idle checkpoint or authorization to compact. Accuracy and host persistence are unverified.' };
-          } catch (error) {
-            if (trace) trace.httpStatus = error?.httpStatus;
-            return { mode: 'hosted-check', advisoryOnly: true, compactionRequested: false,
-              hostedCalls, decision: null, error: failure(caller, invocation, error) };
-          } finally { checking.delete(invocation.sessionID); }
-        }),
+        execute: execute('hosted-check', assess),
       });
     });
-    return () => { lifetime.abort(); return telemetry?.close(); };
+    automatic = await startAutomatic(ctx, options.automatic, { signal: lifetime.signal, remoteEnabled, telemetry,
+      directory: options.telemetry?.directory, timeout, stateVersion,
+      target: typeof endpoint === 'string' && endpoint.startsWith('http:') ? 'loopback-fixture' : 'hosted-jev', assess,
+      capture: (caller, preloaded) => capture(ctx, caller, [], stateVersion, preloaded) });
+    return async () => { lifetime.abort(); await automatic?.stop(); await telemetry?.close(); };
   },
 };

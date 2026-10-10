@@ -9,9 +9,9 @@ replayed real checkpoints and replaced when a measurement shows a gain.
 
 ## Status
 
-The local evaluation CLI works, and an experimental manual OpenCode V2 server
-plugin can be loaded from this checkout. Other live IDE adapters and automatic
-monitoring do not ship yet. No accuracy has been measured, and no default judge
+The local evaluation CLI works, and an experimental OpenCode V2 server
+plugin provides manual checks and a bounded, opt-in automatic pilot.
+Other live IDE adapters do not ship yet. No accuracy has been measured, and no default judge
 has been replaced. TypeSafe Jev remains the
 first production judge and has an implemented, fixture-tested adapter. The eval
 supports **Jev**, **OpenAI Decisions**, **rules**, a **threshold proxy**, and an
@@ -146,8 +146,9 @@ Original scope and host persistence remain unverified. A preview fingerprint may
 differ from a hosted-check fingerprint because preview does not read/scrub the
 known credential, and because the session changes between tool invocations.
 
-Defrag never requests compaction, edits prompts, changes host compaction settings,
-or launches background checks. **OpenCode's own automatic compaction is unaffected.**
+Without the separate `automatic` opt-in below, defrag never requests compaction
+or launches background checks. It never edits prompts or changes host compaction
+settings. **OpenCode's own automatic compaction is unaffected.**
 Package loading has been checked in isolated OpenCode 2.0.20 servers, with remote
 registration disabled and enabled, and the tool/permission contracts have local
 fixtures. One explicitly chat-approved hosted check has succeeded through
@@ -219,6 +220,122 @@ not live Jev timings; setup/drain waits were outside the measurement, and the
 roughly 0.02 ms overhead is not a portable performance guarantee. No additional
 network requests or context reads were made. Slow-writer tests independently
 verify that blocked IO cannot hold up event submission.
+
+### Optional automatic assessment → native compaction pilot
+
+This is **experimental automation, not validated compaction safety**. Add an
+`automatic` object to the existing hosted-check options, keeping `remoteEnabled`,
+`keyFile` and `telemetry`. It is off by default; `true` is not accepted:
+
+```jsonc
+"automatic": {
+  "expiresAt": "<absolute UTC ISO timestamp within the next seven days>",
+  "quietMs": 1000,
+  "cooldownMs": 300000,
+  "maxChecks": 12,
+  "maxCompactions": 3,
+  "minimumInputTokens": 40000,
+  "hardLimitRatio": null
+}
+```
+
+Only `expiresAt` is required; the other values shown are defaults. Set
+`"hardLimitRatio": 0.35` inside this same plugin `options.automatic` block for a
+35% native-compaction backstop; any finite number greater than 0 and at most 1
+is accepted (for example, `0.5` for 50%). `null` or omission disables the backstop
+and preserves the Jev-only gate. Expiry never
+renews on reload. The limits apply across plugin instances using the same
+telemetry directory and expiry. Reservations are persisted **before** inference
+or admission, so cancelled/failed attempts can consume a slot. The private
+`telemetry.directory/automatic/` ledger contains counters, hashed checkpoint and
+session identifiers, and timestamps, never transcript text. An exclusive lease
+prevents overlapping automatic assessments across locations. A crash can leave
+a lease behind; it fails closed rather than guessing that another process stopped.
+
+To remove count limits explicitly, set `"maxChecks": null` and
+`"maxCompactions": null`. Omission still uses the finite defaults above. Unlimited
+counts do not disable expiry, cooldowns, permissions, cancellation, stale-state
+checks; below an enabled hard limit, the frozen judgment gate still applies.
+Hosted assessments and native compactions
+can incur unbounded total cost. Counters persist across reloads, while deduplication
+retains at most 256 recent checkpoints. Records still inside their cooldown are
+not evicted; a saturated recent-history window skips work rather than weakening
+cooldowns. Older evicted checkpoints are not a permanent exactly-once record.
+Unavailable/full telemetry still stops automatic action rather than silently
+continuing without observability.
+
+After a successful execution event, the plugin waits for quiet, checks exact
+location ownership, includes root and child (subagent) sessions, and requires a matching successful
+idle marker, a completed `finish: stop` assistant response, and at least 40,000
+input tokens including cache reads/writes. It skips known active tools, pending
+inbox work and pending permissions. Root sessions require host-wide idle; child
+sessions require only their own execution to be idle, so an active parent or sibling
+does not block them. Permissions use the child's agent, and compaction targets only
+the child, never its parent. An enabled hard
+limit can bypass the 40,000-token minimum, but not the other quiet-checkpoint guards.
+It does not
+poll session histories, replay missed events, or assess every tool call.
+
+The host evaluates `defrag.remote` before the single Jev attempt, and
+`defrag.compact` before compaction. **Allow All stays prompt-free.** For automatic
+requests only, a scoped permission hook turns Ask into Deny rather than granting
+it or repeatedly asking you. Explicit Deny remains final; manual-tool permissions
+and unrelated actions are unchanged. Other permission plugins can also affect
+host decisions. No retries or automatic approval replies are issued.
+
+With no hard limit reached, only `checkpoint-v2` with `decision: true`, `assessment: safe`, the unchanged
+0.9 floor, and unchanged evidence proceeds. Unsafe, uncertain, stale, failed or
+cancelled results withhold compaction. The plugin rechecks permissions, work and
+revision, then admits an idempotent **queued native compaction**—the API equivalent
+of `/compact`, not a fabricated chat command. OpenCode 2.0.20 lacks the plugin
+compaction/inbox methods, so an asynchronous authenticated `opencode api` bridge
+checks the server PID before each operation. Unsupported hosts fail closed.
+Checks run outside reply generation; compaction itself can incur the host's
+normal model cost. Redaction and the classifier remain experimental.
+
+**Hard limit overrides safety judgment:** at or above the configured ratio,
+defrag skips Jev entirely and requests native compaction, even when an assessment
+would be unsafe or uncertain. This is a user-selected pressure policy, not a
+safe recommendation. Usage is the latest completed response's input tokens
+(including cache read/write) plus output, divided by the selected model's
+host-reported `limit.context`; it is not a live tokenizer or guaranteed mid-turn
+ceiling. Unknown/invalid capacity, unknown output usage or a mismatch between the
+response's model and the current selection never forces compaction. Normal Jev
+eligibility still applies in those cases. The native path checks `defrag.compact`,
+not `defrag.remote`, and revalidates evidence and capacity before admission. It
+retains cooldown, expiry, count budgets, ownership, deduplication, telemetry and
+new-work cancellation. A forced attempt consumes one check reservation and one
+compaction reservation, but makes zero hosted assessment calls.
+
+Telemetry distinguishes `automatic-check` from `automatic-compaction`, admission
+from verified completion/failure, and bounded skip/error categories. It labels
+`trigger: "hard-limit"` versus `"jev"` and records numeric usage/capacity/ratio
+metadata. Forced compaction has no Jev recipe or safety judgment.
+Ineligible records include an allowlisted `ineligibleReason` identifying the
+rejecting guard (for example, `foreign-location`, `archived-session`, `stale-idle`
+or `below-minimum-input`), without session paths, transcript text or raw errors.
+Location-less completions can reach multiple plugin instances, so these records
+count per-instance rejections, not unique checkpoints. Completion
+uses one readback of the exact admitted message; only model hashes, cost and token
+counts are projected, not its summary or transcript. Lost events/reloads can leave
+outcomes unknown. The host API does not atomically compare the assessed revision
+with admission: a new request can still race the final revalidation. Queue delivery
+avoids steering/interruption but is not proof that every external worker is idle.
+
+Isolated OpenCode 2.0.20 tests verify Allow/Ask/Deny without pending prompts and a
+positive local-fixture assessment through native admission and completed-summary
+readback. Real host execution/event tests also cover the Jev path and hard-limit
+path, with a loopback model, and native streams that omit location metadata.
+Authoritative session ownership is checked before action. Fixtures and summaries
+are synthetic, external model calls
+are blocked, and these tests do **not** establish Jev accuracy or real continuation
+safety. Frozen evaluation recipes, thresholds and evidence are unchanged.
+
+**Disable:** set `"automatic": false` (or remove that option) to keep manual
+tools, or remove only defrag's plugin entry to disable it entirely. Reload the
+location if the configuration has not reloaded automatically. This cancels pending
+checks, but does not undo a compaction already admitted, disable OpenCode's own
+compaction, or delete logs. `defrag_preview` reports automatic status when enabled.
 
 ## 1. Extract checkpoints
 

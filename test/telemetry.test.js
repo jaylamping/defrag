@@ -88,6 +88,27 @@ test('telemetry never copies arbitrary strings or unknown probabilities into log
   assert.ok(!bytes.includes('fixture-key'));
 });
 
+test('automatic telemetry separates admission, completion, failure and skips without copying native summary payloads', async t => {
+  const path = directory(t), log = await createTelemetry({ directory: path });
+  for (const compactionStatus of ['admitted', 'completed', 'failed', 'unknown']) {
+    log.record({ ...input(), mode: compactionStatus === 'admitted' ? 'automatic-check' : 'automatic-compaction',
+      target: compactionStatus === 'admitted' ? 'loopback-fixture' : 'native-host',
+      result: { ...input().result, compactionRequested: true, compactionStatus },
+      nativeCompaction: { modelHash: 'b'.repeat(64), cost: 0.1, tokens: { input: 5, output: 3, reasoning: 1, cache: { read: 2, write: 0 } },
+        summary: 'PRIVATE SUMMARY', recent: 'PRIVATE TRANSCRIPT', error: 'PRIVATE DIAGNOSTIC' } });
+  }
+  log.record({ mode: 'automatic-check', result: { error: 'automatic-permission', hostedCalls: 0, compactionRequested: false } });
+  log.record({ ...input(), result: { ...input().result, compactionRequested: true } });
+  await log.close();
+  const text = readFileSync(join(path, readdirSync(path)[0]), 'utf8'), events = text.trim().split('\n').map(JSON.parse);
+  assert.ok(!text.includes('PRIVATE'));
+  assert.deepEqual(events.slice(0, 4).map(e => e.compactionStatus), ['admitted', 'completed', 'failed', 'unknown']);
+  assert.ok(events.slice(0, 4).every(e => e.compactionRequested && e.nativeCompaction.cost === 0.1));
+  assert.equal(events[4].error, 'automatic-permission');
+  assert.equal(events[4].compactionRequested, false);
+  assert.equal(events[5].compactionRequested, false, 'manual results cannot claim compaction');
+});
+
 test('slow writes do not block record submission, queue is bounded and close has a bounded wait', async t => {
   const path = directory(t);
   let release;
@@ -121,6 +142,33 @@ test('unsafe directories and symlinks disable logging without exposing filesyste
     assert.ok(!JSON.stringify(log.status()).includes(path));
     await log.close();
   }
+});
+
+test('hard-limit telemetry labels a policy override without fabricating a Jev recipe or judgment', async t => {
+  const path = directory(t), log = await createTelemetry({ directory: path });
+  log.record({ mode: 'automatic-check', target: 'native-host', sessionID: 'ses_PRIVATE', stateVersion: 3,
+    pressure: { inputTokens: 34000, usedTokens: 35000, contextTokens: 100000, hardLimitRatio: 0.35, text: 'PRIVATE' },
+    result: { trigger: 'hard-limit', hostedCalls: 0, decision: null, stateUnchanged: true, compactionRequested: true, compactionStatus: 'admitted' } });
+  await log.close();
+  const raw = readFileSync(join(path, readdirSync(path)[0]), 'utf8'), value = JSON.parse(raw);
+  assert.equal(value.trigger, 'hard-limit');
+  assert.equal(value.recipe, null);
+  assert.equal(value.hostedCalls, 0);
+  assert.equal(value.result.assessment, null);
+  assert.deepEqual(value.pressure, { inputTokens: 34000, usedTokens: 35000, contextTokens: 100000, hardLimitRatio: 0.35 });
+  assert.ok(!raw.includes('PRIVATE'));
+});
+
+test('ineligible telemetry retains only bounded guard reasons, never arbitrary diagnostics', async t => {
+  const path = directory(t), log = await createTelemetry({ directory: path });
+  for (const ineligibleReason of ['foreign-location', 'child-session', 'below-minimum-input', 'PRIVATE raw diagnostic']) {
+    log.record({ mode: 'automatic-check', ineligibleReason, result: { error: 'automatic-ineligible', hostedCalls: 0 } });
+  }
+  await log.close();
+  const raw = readFileSync(join(path, readdirSync(path)[0]), 'utf8');
+  const events = raw.trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(events.map(e => e.ineligibleReason), ['foreign-location', 'child-session', 'below-minimum-input', null]);
+  assert.ok(!raw.includes('PRIVATE'));
 });
 
 test('write failures are contained, drop bounded work and never return raw errors', async t => {

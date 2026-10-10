@@ -213,9 +213,11 @@ test('stream timestamp normalization does not hide other message or observer lif
   }
 });
 
-test('observer stream bookkeeping does not hide session agent, model or revert changes', async () => {
+test('observer stream bookkeeping does not hide session settings, permission or idle lifecycle changes', async () => {
   for (const [field, changed] of [
     ['agent', 'plan'], ['model', { providerID: 'fixture', id: 'different' }], ['revert', { messageID: 'msg_request' }],
+    ['permissions', [{ action: '*', resource: '*', effect: 'deny' }]], ['outcome', 'interrupted'],
+    ['time', { idle: 5, archived: 6 }],
   ]) {
     await hostedFixture(async ({ options, requests, control }) => {
       const session = { agent: 'build', model: { providerID: 'fixture', id: 'original' } };
